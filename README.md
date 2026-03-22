@@ -13,7 +13,7 @@ Built with [Playwright](https://playwright.dev) + [MCP SDK](https://github.com/m
 **Prerequisites:** Node.js 18+, pnpm
 
 ```bash
-git clone https://github.com/emadklenka/mare-browser-mcp
+git clone https://github.com/emadklenka/mare_browser_mcp
 cd mare-browser-mcp
 pnpm install
 npx playwright install chromium

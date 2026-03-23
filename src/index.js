@@ -18,15 +18,50 @@ let consoleLog = [];
 let networkLog = [];
 
 const HEADLESS = process.env.HEADLESS === "true";
+const REAL_CHROME = process.env.REAL_CHROME === "true";
+const CHROME_PROFILE = process.env.CHROME_PROFILE || "Default";
 const MAX_BODY_SIZE = 16 * 1024; // 16KB max captured response body
 
 // ─── Lazy init ────────────────────────────────────────────────────────────────
 async function ensureBrowser() {
   if (page) return;
 
-  browser = await chromium.launch({ headless: HEADLESS, args: ["--start-maximized"] });
-  context = await browser.newContext({ viewport: null });
+  if (REAL_CHROME) {
+    const userDataDir = `${process.env.HOME}/Library/Application Support/Google/Chrome-MCP`;
+    context = await chromium.launchPersistentContext(userDataDir, {
+      channel: "chrome",
+      headless: false,
+      viewport: null,
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: [
+        "--start-maximized",
+        `--profile-directory=${CHROME_PROFILE}`,
+        "--disable-blink-features=AutomationControlled",
+      ],
+    });
+  } else {
+    browser = await chromium.launch({
+      headless: HEADLESS,
+      args: [
+        "--start-maximized",
+        "--disable-blink-features=AutomationControlled",
+      ],
+    });
+    context = await browser.newContext({
+      viewport: null,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    });
+  }
   page = await context.newPage();
+
+  // Hide automation signals from Cloudflare / bot-detection
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
+    Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    window.chrome = { runtime: {} };
+  });
 
   page.on("console", msg => {
     consoleLog.push({ type: msg.type(), text: msg.text(), ts: new Date().toISOString() });

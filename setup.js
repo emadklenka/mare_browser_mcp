@@ -9,7 +9,7 @@ const entry = resolve(__dirname, "src/index.js");
 console.log("Registering mare-browser with Claude Code...");
 
 try {
-  execSync(`claude mcp add mare-browser -e HEADLESS=false -- node "${entry}"`, {
+  execSync(`claude mcp add mare-browser --scope user -e HEADLESS=false -- node "${entry}"`, {
     stdio: "inherit",
   });
   console.log("Done! Restart Claude Code and the browser tools will be ready.");

@@ -16,6 +16,7 @@ let context = null;
 let page = null;
 let consoleLog = [];
 let networkLog = [];
+let dialogLog = [];
 
 const HEADLESS = process.env.HEADLESS === "true";
 const REAL_CHROME = process.env.REAL_CHROME === "true";
@@ -134,6 +135,17 @@ async function ensureBrowser() {
     });
     if (networkLog.length > 200) networkLog.shift();
   });
+
+  page.on("dialog", async dialog => {
+    dialogLog.push({
+      type: dialog.type(),
+      message: dialog.message(),
+      default_value: dialog.defaultValue() || null,
+      ts: new Date().toISOString(),
+    });
+    if (dialogLog.length > 50) dialogLog.shift();
+    await dialog.accept();
+  });
 }
 
 // ─── Tool handlers ────────────────────────────────────────────────────────────
@@ -142,6 +154,7 @@ async function browserNavigate({ url, clear_logs }) {
   if (clear_logs) {
     consoleLog = [];
     networkLog = [];
+    dialogLog = [];
   }
   await page.goto(url);
   return { url, title: await page.title() };
@@ -155,8 +168,13 @@ async function browserAct({ commands }) {
     try {
       switch (cmd.action) {
         case "click":
-          await page.locator(cmd.selector).first().click({ timeout: 5000 });
-          results.push({ action: "click", selector: cmd.selector, success: true });
+          await page.locator(cmd.selector).first().click({ button: cmd.button || "left", timeout: 5000 });
+          results.push({ action: "click", selector: cmd.selector, button: cmd.button || "left", success: true });
+          break;
+
+        case "hover":
+          await page.locator(cmd.selector).first().hover({ timeout: 5000 });
+          results.push({ action: "hover", selector: cmd.selector, success: true });
           break;
 
         case "clicklink": {
@@ -245,14 +263,15 @@ async function browserDebug({ url_filter, method_filter, console_types, last_n }
     title,
     console: logs.slice(-n),
     network: network.slice(-n),
+    dialogs: dialogLog.slice(-n),
   };
 }
 
-async function browserQuery({ selector, all, fields }) {
+async function browserQuery({ selector, all, fields, visible_only, limit }) {
   await ensureBrowser();
 
   const data = await page.evaluate(
-    ({ sel, all, fields }) => {
+    ({ sel, all, fields, visible_only, limit }) => {
       const extract = el => {
         if (!el) return null;
         if (fields?.length) {
@@ -274,13 +293,18 @@ async function browserQuery({ selector, all, fields }) {
           visible: el.offsetParent !== null,
         };
       };
-      if (all) return Array.from(document.querySelectorAll(sel)).map(extract);
+      if (all) {
+        let elements = Array.from(document.querySelectorAll(sel));
+        if (visible_only) elements = elements.filter(el => el.offsetParent !== null);
+        if (limit) elements = elements.slice(0, limit);
+        return elements.map(extract);
+      }
       return extract(document.querySelector(sel));
     },
-    { sel: selector, all, fields }
+    { sel: selector, all, fields, visible_only, limit }
   );
 
-  return { selector, result: data };
+  return { selector, count: Array.isArray(data) ? data.length : undefined, result: data };
 }
 
 async function browserScreenshot() {
@@ -299,10 +323,11 @@ async function browserEval({ code }) {
   return { result };
 }
 
-async function browserScroll({ direction, pixels, selector }) {
+async function browserScroll({ direction, pixels, selector, container }) {
   await ensureBrowser();
 
-  if (selector) {
+  // Scroll to bring an element into view (no container context)
+  if (selector && !container) {
     await page.locator(selector).scrollIntoViewIfNeeded();
     return { scrolled_to: selector };
   }
@@ -310,6 +335,24 @@ async function browserScroll({ direction, pixels, selector }) {
   const px = pixels || 500;
   const dy = direction === "up" ? -px : px;
 
+  // Scroll within a specific container element
+  if (container) {
+    const position = await page.evaluate(({ containerSel, dy }) => {
+      const el = document.querySelector(containerSel);
+      if (!el) throw new Error(`Container not found: ${containerSel}`);
+      el.scrollTop += dy;
+      return {
+        container: containerSel,
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      };
+    }, { containerSel: container, dy });
+
+    return { scrolled_by: dy, ...position };
+  }
+
+  // Default: scroll the page
   await page.evaluate(dy => window.scrollBy(0, dy), dy);
 
   const position = await page.evaluate(() => ({
@@ -325,6 +368,7 @@ async function browserRestart({ url }) {
   await teardown();
   consoleLog = [];
   networkLog = [];
+  dialogLog = [];
   await ensureBrowser();
   if (url) {
     await page.goto(url);
@@ -377,7 +421,7 @@ async function browserWaitForNetwork({ url_pattern, method, timeout }) {
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.1.0" },
+  { name: "mare-browser-mcp", version: "1.2.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -402,7 +446,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "browser_act",
       description:
-        "Perform one or more browser actions in sequence: click, fill, keypress, scroll, wait. Batch multiple steps into one call.",
+        "Perform one or more browser actions in sequence: click (with left/right/middle button), hover, fill, keypress, scroll, wait. Use hover for tooltips, dropdown menus, and hover states. Use click with button:'right' for context menus. Batch multiple steps into one call.",
       inputSchema: {
         type: "object",
         properties: {
@@ -414,9 +458,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               properties: {
                 action: {
                   type: "string",
-                  enum: ["click", "clicklink", "fill", "select", "keypress", "waitfor", "scrollto", "wait", "clearconsole"],
+                  enum: ["click", "hover", "clicklink", "fill", "select", "keypress", "waitfor", "scrollto", "wait", "clearconsole"],
                 },
-                selector: { type: "string", description: "CSS selector (for click, fill, waitfor, scrollto)" },
+                selector: { type: "string", description: "CSS selector (for click, hover, fill, waitfor, scrollto)" },
+                button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button for click (default: left). Use 'right' for context menus" },
                 text: { type: "string", description: "Link text (for clicklink)" },
                 value: { type: "string", description: "Text to fill (for fill)" },
                 key: { type: "string", description: "Key to press e.g. Enter, Tab (for keypress)" },
@@ -451,12 +496,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "browser_query",
       description:
-        "Query DOM elements by CSS selector. Use to check element state, text, visibility, or values without taking a screenshot.",
+        "Query DOM elements by CSS selector. Use to check element state, text, visibility, or values without taking a screenshot. Use visible_only and limit to avoid huge result sets on broad selectors.",
       inputSchema: {
         type: "object",
         properties: {
           selector: { type: "string", description: "CSS selector" },
           all: { type: "boolean", description: "Return all matching elements (default false = first only)" },
+          visible_only: { type: "boolean", description: "Only return visible elements — filters out hidden/offscreen elements (default false). Recommended for broad selectors." },
+          limit: { type: "number", description: "Max number of elements to return when using all:true (e.g. 10, 20). Prevents huge payloads on broad selectors." },
           fields: {
             type: "array",
             items: { type: "string" },
@@ -478,7 +525,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "browser_eval",
       description:
-        "Execute JavaScript in the page context and return the result. Use for calling APIs (fetch), reading JS variables, manipulating the DOM, or anything that needs to run in the browser. The code is evaluated as an expression — use an IIFE for multi-statement code.",
+        `Execute JavaScript in the page context and return the result. This is your ESCAPE HATCH for anything the other tools don't cover. Common use cases:
+• Read computed styles: getComputedStyle(el).backgroundColor
+• Append text to inputs without clearing: el.value += '...'; el.dispatchEvent(new Event('input', {bubbles:true}))
+• Type character-by-character for autocomplete: use dispatchEvent with input events per character
+• Drag-and-drop: create and dispatch mousedown/mousemove/mouseup or dragstart/drop events
+• Call fetch() to hit APIs directly and return JSON
+• Read JS app state: window.__store__, React devtools, etc.
+• Check visibility via CSS: getComputedStyle(el).display, opacity, visibility
+• Scroll inside a container: document.querySelector('.container').scrollTop += 500
+The code is evaluated as an expression — use an IIFE for multi-statement code.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -493,13 +549,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "browser_scroll",
       description:
-        "Scroll the page. Either scroll by pixels (up/down) or scroll to a specific element. Returns scroll position info.",
+        "Scroll the page, scroll within a specific container element (e.g. AG-Grid viewport, chat panel, sidebar), or scroll an element into view. Use 'container' to scroll inside scrollable divs instead of the page.",
       inputSchema: {
         type: "object",
         properties: {
           direction: { type: "string", enum: ["up", "down"], description: "Scroll direction (default: down)" },
           pixels: { type: "number", description: "Pixels to scroll (default: 500). Use large values like 99999 to scroll to top/bottom." },
           selector: { type: "string", description: "CSS selector to scroll into view (overrides direction/pixels)" },
+          container: { type: "string", description: "CSS selector of a scrollable container to scroll within (e.g. '.ag-body-viewport', '.chat-messages')" },
         },
       },
     },

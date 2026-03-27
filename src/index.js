@@ -23,11 +23,32 @@ const CHROME_PROFILE = process.env.CHROME_PROFILE || "Default";
 const MAX_BODY_SIZE = 16 * 1024; // 16KB max captured response body
 
 // ─── Lazy init ────────────────────────────────────────────────────────────────
+async function isPageAlive() {
+  if (!page) return false;
+  try {
+    await page.evaluate(() => true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function teardown() {
+  page = null;
+  try { await context?.close(); } catch {}
+  try { await browser?.close(); } catch {}
+  context = null;
+  browser = null;
+}
+
 async function ensureBrowser() {
-  if (page) return;
+  if (page && await isPageAlive()) return;
+
+  // Dead session — clean up before reinitialising
+  if (page) await teardown();
 
   if (REAL_CHROME) {
-    const userDataDir = `${process.env.HOME}/Library/Application Support/Google/Chrome-MCP`;
+     const userDataDir = `${process.env.HOME}/Library/Application Support/Google/Chrome-MCP`;
     context = await chromium.launchPersistentContext(userDataDir, {
       channel: "chrome",
       headless: false,
@@ -139,8 +160,19 @@ async function browserAct({ commands }) {
           break;
 
         case "clicklink": {
-          let loc = page.getByRole("link", { name: cmd.text, exact: true });
-          if ((await loc.count()) === 0) loc = page.locator(`a:has-text("${cmd.text}")`);
+          let loc;
+          // 1. Role-based, partial match, visible
+          loc = page.getByRole("link", { name: cmd.text, exact: false })
+                    .locator(':visible');
+          // 2. Any visible <a> containing the text
+          if ((await loc.count()) === 0)
+            loc = page.locator('a:visible').filter({ hasText: cmd.text });
+          // 3. Broaden to any visible interactive element (buttons, tabs, etc.)
+          if ((await loc.count()) === 0)
+            loc = page.locator('a:visible, button:visible, [role="button"]:visible, [role="tab"]:visible')
+                      .filter({ hasText: cmd.text });
+          if ((await loc.count()) === 0)
+            throw new Error(`No visible element found with text "${cmd.text}"`);
           await loc.first().click({ timeout: 5000 });
           results.push({ action: "clicklink", text: cmd.text, success: true });
           break;
@@ -287,6 +319,24 @@ async function browserScroll({ direction, pixels, selector }) {
   }));
 
   return { scrolled_by: dy, ...position };
+}
+
+async function browserRestart({ url }) {
+  await teardown();
+  consoleLog = [];
+  networkLog = [];
+  await ensureBrowser();
+  if (url) {
+    await page.goto(url);
+    return { restarted: true, url, title: await page.title() };
+  }
+  return { restarted: true };
+}
+
+async function browserUpload({ selector, files }) {
+  await ensureBrowser();
+  await page.setInputFiles(selector, files);
+  return { selector, files, success: true };
 }
 
 async function browserWaitForNetwork({ url_pattern, method, timeout }) {
@@ -454,6 +504,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "browser_restart",
+      description:
+        "Close and reopen the browser session. Use when the page is dead, crashed, or stuck after navigating to an external site. Optionally navigate to a URL immediately after restart.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "URL to navigate to after restart (optional)" },
+        },
+      },
+    },
+    {
+      name: "browser_upload",
+      description: "Upload one or more files to a file input element. Use the CSS selector to target the input and provide absolute file paths.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "CSS selector for the file input element" },
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description: "Absolute path(s) to the file(s) to upload",
+          },
+        },
+        required: ["selector", "files"],
+      },
+    },
+    {
       name: "browser_wait_for_network",
       description:
         "Wait for a specific network response matching URL pattern and/or method. Returns the response with status and JSON body. Use after triggering an action to wait for its API call to complete instead of guessing with wait times.",
@@ -476,13 +553,15 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     let result;
 
     switch (name) {
-      case "browser_navigate":        result = await browserNavigate(args); break;
-      case "browser_act":             result = await browserAct(args); break;
-      case "browser_debug":           result = await browserDebug(args ?? {}); break;
-      case "browser_query":           result = await browserQuery(args); break;
-      case "browser_screenshot":      result = await browserScreenshot(); break;
-      case "browser_eval":            result = await browserEval(args); break;
-      case "browser_scroll":          result = await browserScroll(args ?? {}); break;
+      case "browser_navigate":         result = await browserNavigate(args); break;
+      case "browser_act":              result = await browserAct(args); break;
+      case "browser_debug":            result = await browserDebug(args ?? {}); break;
+      case "browser_query":            result = await browserQuery(args); break;
+      case "browser_screenshot":       result = await browserScreenshot(); break;
+      case "browser_eval":             result = await browserEval(args); break;
+      case "browser_scroll":           result = await browserScroll(args ?? {}); break;
+      case "browser_restart":          result = await browserRestart(args ?? {}); break;
+      case "browser_upload":           result = await browserUpload(args); break;
       case "browser_wait_for_network": result = await browserWaitForNetwork(args); break;
       default:
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };

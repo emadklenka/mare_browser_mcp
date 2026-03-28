@@ -1,6 +1,6 @@
 {
   "name": "mare-browser-mcp",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "type": "module",
   "bin": {
     "mare-browser-mcp": "./src/index.js"

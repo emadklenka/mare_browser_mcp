@@ -17,11 +17,12 @@ let page = null;
 let consoleLog = [];
 let networkLog = [];
 let dialogLog = [];
+const pendingRequests = new Map(); // reqId → { url, method, startTime, ... }
 
 const HEADLESS = process.env.HEADLESS === "true";
 const REAL_CHROME = process.env.REAL_CHROME === "true";
+const MAX_BODY_SIZE = 4096; // 4KB cap for request/response bodies
 const CHROME_PROFILE = process.env.CHROME_PROFILE || "Default";
-const MAX_BODY_SIZE = 16 * 1024; // 16KB max captured response body
 
 // ─── Lazy init ────────────────────────────────────────────────────────────────
 async function isPageAlive() {
@@ -95,26 +96,84 @@ async function ensureBrowser() {
     if (consoleLog.length > 100) consoleLog.shift();
   });
 
-  page.on("response", async res => {
-    const url = res.url();
-    // Only capture API/XHR responses, skip static assets
+  // ── Network: capture request start + body ──
+  page.on("request", req => {
+    const url = req.url();
+    // Skip static assets and CORS preflight
     if (/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf|ico)(\?|$)/.test(url)) return;
+    if (req.method() === "OPTIONS") return;
 
     const entry = {
       url,
-      method: res.request().method(),
-      status: res.status(),
+      method: req.method(),
+      startTime: Date.now(),
       ts: new Date().toISOString(),
     };
+
+    // Parse query params into object
+    try {
+      const parsed = new URL(url);
+      const params = Object.fromEntries(parsed.searchParams);
+      if (Object.keys(params).length) entry.params = params;
+    } catch {}
+
+    // Capture request body
+    const postData = req.postData();
+    if (postData) {
+      const contentType = (req.headers()["content-type"] || "").toLowerCase();
+      if (contentType.includes("json")) {
+        try {
+          entry.requestBody = postData.length <= MAX_BODY_SIZE
+            ? JSON.parse(postData)
+            : `[truncated: ${postData.length} bytes]`;
+        } catch {
+          entry.requestBody = postData.length <= MAX_BODY_SIZE ? postData : `[truncated: ${postData.length} bytes]`;
+        }
+      } else if (contentType.includes("x-www-form-urlencoded")) {
+        try {
+          entry.requestBody = Object.fromEntries(new URLSearchParams(postData));
+        } catch {
+          entry.requestBody = postData.slice(0, MAX_BODY_SIZE);
+        }
+      } else if (contentType.includes("multipart")) {
+        entry.requestBody = "[multipart/form-data]";
+      } else if (postData.length <= MAX_BODY_SIZE) {
+        entry.requestBody = postData;
+      } else {
+        entry.requestBody = `[binary: ${postData.length} bytes]`;
+      }
+    }
+
+    // Capture filtered request headers
+    const headers = req.headers();
+    const filteredHeaders = {};
+    if (headers["content-type"]) filteredHeaders["content-type"] = headers["content-type"];
+    if (headers["authorization"]) filteredHeaders["authorization"] = headers["authorization"].replace(/^(Bearer\s+).+/, "$1***");
+    if (headers["cookie"]) filteredHeaders["cookie"] = "[present]";
+    if (Object.keys(filteredHeaders).length) entry.requestHeaders = filteredHeaders;
+
+    pendingRequests.set(req, entry);
+  });
+
+  // ── Network: capture response + timing ──
+  page.on("response", async res => {
+    const req = res.request();
+    const entry = pendingRequests.get(req);
+    if (!entry) return; // was filtered (static asset / OPTIONS)
+    pendingRequests.delete(req);
+
+    entry.status = res.status();
+    entry.duration_ms = Date.now() - entry.startTime;
+    delete entry.startTime;
 
     try {
       const contentType = res.headers()["content-type"] || "";
       if (contentType.includes("json")) {
         const buf = await res.body();
         if (buf.length <= MAX_BODY_SIZE) {
-          entry.body = JSON.parse(buf.toString("utf-8"));
+          entry.responseBody = JSON.parse(buf.toString("utf-8"));
         } else {
-          entry.body = `[truncated: ${buf.length} bytes]`;
+          entry.responseBody = `[truncated: ${buf.length} bytes]`;
         }
       }
     } catch {
@@ -125,14 +184,23 @@ async function ensureBrowser() {
     if (networkLog.length > 200) networkLog.shift();
   });
 
+  // ── Network: capture failed requests ──
   page.on("requestfailed", req => {
-    networkLog.push({
+    const entry = pendingRequests.get(req) || {
       url: req.url(),
       method: req.method(),
-      failed: true,
-      error: req.failure()?.errorText,
       ts: new Date().toISOString(),
-    });
+    };
+    pendingRequests.delete(req);
+
+    entry.failed = true;
+    entry.error = req.failure()?.errorText;
+    if (entry.startTime) {
+      entry.duration_ms = Date.now() - entry.startTime;
+      delete entry.startTime;
+    }
+
+    networkLog.push(entry);
     if (networkLog.length > 200) networkLog.shift();
   });
 
@@ -155,6 +223,7 @@ async function browserNavigate({ url, clear_logs }) {
     consoleLog = [];
     networkLog = [];
     dialogLog = [];
+    pendingRequests.clear();
   }
   await page.goto(url);
   return { url, title: await page.title() };
@@ -226,6 +295,27 @@ async function browserAct({ commands }) {
           results.push({ action: "wait", ms: cmd.ms, success: true });
           break;
 
+        case "drag": {
+          const source = page.locator(cmd.selector).first();
+          if (cmd.target) {
+            await source.dragTo(page.locator(cmd.target).first(), { timeout: 5000 });
+            results.push({ action: "drag", selector: cmd.selector, target: cmd.target, success: true });
+          } else if (cmd.offsetX !== undefined || cmd.offsetY !== undefined) {
+            const box = await source.boundingBox();
+            if (!box) throw new Error(`Element not visible: ${cmd.selector}`);
+            const startX = box.x + box.width / 2;
+            const startY = box.y + box.height / 2;
+            await page.mouse.move(startX, startY);
+            await page.mouse.down();
+            await page.mouse.move(startX + (cmd.offsetX || 0), startY + (cmd.offsetY || 0), { steps: 10 });
+            await page.mouse.up();
+            results.push({ action: "drag", selector: cmd.selector, offsetX: cmd.offsetX, offsetY: cmd.offsetY, success: true });
+          } else {
+            throw new Error("drag requires either 'target' (CSS selector) or 'offsetX'/'offsetY' (pixels)");
+          }
+          break;
+        }
+
         case "clearconsole":
           consoleLog = [];
           await page.evaluate(() => console.clear());
@@ -267,8 +357,17 @@ async function browserDebug({ url_filter, method_filter, console_types, last_n }
   };
 }
 
-async function browserQuery({ selector, all, fields, visible_only, limit }) {
+async function browserQuery({ selector, all, fields, visible_only, limit, count_only }) {
   await ensureBrowser();
+
+  if (count_only) {
+    const count = await page.evaluate(({ sel, visible_only }) => {
+      let elements = Array.from(document.querySelectorAll(sel));
+      if (visible_only) elements = elements.filter(el => el.offsetParent !== null);
+      return elements.length;
+    }, { sel: selector, visible_only });
+    return { selector, count };
+  }
 
   const data = await page.evaluate(
     ({ sel, all, fields, visible_only, limit }) => {
@@ -369,6 +468,7 @@ async function browserRestart({ url }) {
   consoleLog = [];
   networkLog = [];
   dialogLog = [];
+  pendingRequests.clear();
   await ensureBrowser();
   if (url) {
     await page.goto(url);
@@ -421,7 +521,7 @@ async function browserWaitForNetwork({ url_pattern, method, timeout }) {
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.2.0" },
+  { name: "mare-browser-mcp", version: "1.3.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -446,7 +546,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "browser_act",
       description:
-        "Perform one or more browser actions in sequence: click (with left/right/middle button), hover, fill, keypress, scroll, wait. Use hover for tooltips, dropdown menus, and hover states. Use click with button:'right' for context menus. Batch multiple steps into one call.",
+        `Perform one or more browser actions in sequence. Batch multiple steps into one call. Available actions:
+• click — click an element (supports left/right/middle button). Use button:'right' for context menus
+• hover — hover over an element for tooltips, dropdown menus, hover states
+• drag — drag an element to a target selector (column reorder, kanban) OR by pixel offset (column resize, sliders). Use target for element-to-element, offsetX/offsetY for precise pixel drag
+• clicklink — click a link/button by visible text
+• fill — fill an input field (clears first)
+• select — select a dropdown option
+• keypress — press a key (Enter, Tab, Escape, etc.)
+• waitfor — wait for an element to appear
+• scrollto — scroll an element into view
+• wait — pause for N milliseconds
+• clearconsole — clear captured console logs`,
       inputSchema: {
         type: "object",
         properties: {
@@ -458,10 +569,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               properties: {
                 action: {
                   type: "string",
-                  enum: ["click", "hover", "clicklink", "fill", "select", "keypress", "waitfor", "scrollto", "wait", "clearconsole"],
+                  enum: ["click", "hover", "drag", "clicklink", "fill", "select", "keypress", "waitfor", "scrollto", "wait", "clearconsole"],
                 },
-                selector: { type: "string", description: "CSS selector (for click, hover, fill, waitfor, scrollto)" },
+                selector: { type: "string", description: "CSS selector (for click, hover, drag, fill, waitfor, scrollto)" },
                 button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button for click (default: left). Use 'right' for context menus" },
+                target: { type: "string", description: "CSS selector of drop target (for drag — element-to-element drag)" },
+                offsetX: { type: "number", description: "Horizontal pixels to drag (for drag — precise pixel drag, e.g. column resize)" },
+                offsetY: { type: "number", description: "Vertical pixels to drag (for drag — precise pixel drag, e.g. slider)" },
                 text: { type: "string", description: "Link text (for clicklink)" },
                 value: { type: "string", description: "Text to fill (for fill)" },
                 key: { type: "string", description: "Key to press e.g. Enter, Tab (for keypress)" },
@@ -478,7 +592,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "browser_debug",
       description:
-        "PREFERRED DEBUGGING TOOL. Returns current URL, page title, console logs, and network requests (with status codes and JSON response bodies) in one call. Always call this before browser_screenshot. Filters available for focused debugging.",
+        `PREFERRED DEBUGGING TOOL. Returns current URL, page title, console logs, dialogs (alert/confirm/prompt), and rich network requests in one call. Always call this before browser_screenshot.
+Network entries include: method, URL, query params (parsed), request body (JSON/form), request headers (auth masked), status code, response body (JSON), and duration_ms for performance analysis.
+Use url_filter and method_filter to focus on specific API calls. Use console_types to filter log levels.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -502,7 +618,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           selector: { type: "string", description: "CSS selector" },
           all: { type: "boolean", description: "Return all matching elements (default false = first only)" },
-          visible_only: { type: "boolean", description: "Only return visible elements — filters out hidden/offscreen elements (default false). Recommended for broad selectors." },
+          count_only: { type: "boolean", description: "Just return the count of matching elements — no element data. Fast way to check 'how many rows?', 'how many errors?'. Combines with visible_only." },
+          visible_only: { type: "boolean", description: "Only return/count visible elements — filters out hidden/offscreen elements (default false). Recommended for broad selectors." },
           limit: { type: "number", description: "Max number of elements to return when using all:true (e.g. 10, 20). Prevents huge payloads on broad selectors." },
           fields: {
             type: "array",

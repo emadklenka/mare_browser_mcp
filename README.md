@@ -45,43 +45,98 @@ That's it. The script detects the correct path automatically and registers the M
 
 ---
 
+## Register with OpenCode
+
+Add this to `~/.config/opencode/opencode.json` (global) or `opencode.json` (project root):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mare_browser_mcp": {
+      "type": "local",
+      "command": [
+        "node",
+        "/absolute/path/to/mare-browser-mcp/src/index.js"
+      ]
+    }
+  }
+}
+```
+
+**Important:** Use the absolute path to `src/index.js` — relative paths won't work.
+
+---
+
 ## Tools
 
 ### `browser_navigate(url, clear_logs?)`
-Navigate to a URL. Pass `clear_logs: true` when starting a new task to wipe stale console/network history.
+Navigate to a URL. Pass `clear_logs: true` when starting a new task to wipe stale console/network/dialog history.
 
 ### `browser_act(commands[])`
 Run a sequence of actions in one call. Supported actions:
 
-| action | required params | what it does |
-|---|---|---|
-| `click` | `selector` | Click an element |
-| `clicklink` | `text` | Click a link by its visible text |
-| `fill` | `selector`, `value` | Type into an input |
-| `select` | `selector`, `value` | Select a dropdown option |
-| `keypress` | `key` | Press a key (e.g. `Enter`, `Tab`) |
-| `waitfor` | `selector`, `timeout?` | Wait until element appears |
-| `scrollto` | `selector` | Scroll element into view |
-| `wait` | `ms` | Pause for N milliseconds |
-| `clearconsole` | — | Clear console log buffer |
+| action | required params | optional params | what it does |
+|---|---|---|---|
+| `click` | `selector` | `button` (`left`/`right`/`middle`) | Click an element. Use `button: "right"` for context menus |
+| `hover` | `selector` | | Hover over an element — triggers tooltips, dropdown menus, hover states |
+| `drag` | `selector` | `target` or `offsetX`/`offsetY` | Drag an element to another element (`target`) or by pixel offset (for resizing, sliders) |
+| `clicklink` | `text` | | Click a link/button by its visible text |
+| `fill` | `selector`, `value` | | Type into an input (clears first) |
+| `select` | `selector`, `value` | | Select a dropdown option |
+| `keypress` | `key` | | Press a key (e.g. `Enter`, `Tab`, `Escape`) |
+| `waitfor` | `selector` | `timeout` | Wait until element appears |
+| `scrollto` | `selector` | | Scroll element into view |
+| `wait` | `ms` | | Pause for N milliseconds |
+| `clearconsole` | — | | Clear console log buffer |
 
 ### `browser_debug()`
-**Start here when something goes wrong.** Returns current URL, page title, console logs, and network requests (with JSON response bodies) in one call. Filter by `url_filter`, `method_filter`, `console_types`, or `last_n`.
+**Start here when something goes wrong.** Returns in one call:
+- Current URL and page title
+- Console logs (filterable by type: `error`, `warning`, `log`, `pageerror`)
+- Network requests with: method, URL, query params, request body, request headers (auth masked), status code, response body (JSON), and `duration_ms` timing
+- Dialog history (alert/confirm/prompt — auto-accepted, text captured)
 
-### `browser_query(selector, all?, fields?)`
-Read the DOM without a screenshot. Query any element by CSS selector. Extract `text`, `value`, `visible`, `disabled`, `className`, `href`, or `innerHTML`.
+Filter with `url_filter`, `method_filter`, `console_types`, or `last_n`.
+
+### `browser_query(selector, all?, fields?, visible_only?, limit?, count_only?)`
+Read the DOM without a screenshot. Query any element by CSS selector.
+
+| param | what it does |
+|---|---|
+| `all` | Return all matching elements (default: first only) |
+| `fields` | Pick fields: `text`, `value`, `visible`, `disabled`, `className`, `href`, `innerHTML` |
+| `visible_only` | Filter to visible elements only — recommended for broad selectors |
+| `limit` | Cap the number of results (e.g. `10`) to prevent huge payloads |
+| `count_only` | Just return the count — fast way to check "how many rows?" without fetching data |
 
 ### `browser_eval(code)`
-Execute JavaScript in the page and return the result. Useful for reading JS state, calling APIs via `fetch`, or manipulating the DOM directly.
+**Escape hatch** for anything the other tools don't cover:
+- Read computed styles: `getComputedStyle(el).backgroundColor`
+- Append text to inputs without clearing
+- Type character-by-character for autocomplete
+- Drag-and-drop via manual DOM events
+- Call `fetch()` to hit APIs directly
+- Read JS app state (`window.__store__`, etc.)
+- Check CSS visibility (`display`, `opacity`, `visibility`)
 
-### `browser_scroll(direction?, pixels?, selector?)`
-Scroll the page up/down by pixels, or scroll a specific element into view.
+### `browser_scroll(direction?, pixels?, selector?, container?)`
+Three modes:
+- **Page scroll:** `direction: "down", pixels: 500`
+- **Scroll into view:** `selector: ".my-element"`
+- **Scroll within a container:** `container: ".ag-body-viewport", direction: "down", pixels: 300` — for scrollable divs, grid viewports, chat panels
 
 ### `browser_wait_for_network(url_pattern?, method?, timeout?)`
 Wait for a specific network response after triggering an action — smarter than guessing with `wait`.
 
 ### `browser_screenshot()`
 Returns a PNG screenshot. **Use as a last resort** — prefer `browser_debug` and `browser_query` first.
+
+### `browser_upload(selector, files[])`
+Upload files to a file input element.
+
+### `browser_restart(url?)`
+Kill the browser and start fresh. Clears all logs. Optionally navigate to a URL after restart.
 
 ---
 
@@ -95,8 +150,40 @@ Returns a PNG screenshot. **Use as a last resort** — prefer `browser_debug` an
      { action: "click", selector: "button[type=submit]" }
    ])
 3. browser_wait_for_network({ url_pattern: "/api/session", method: "POST" })
-4. browser_debug({ console_types: ["error"] })   ← check for login errors
-5. browser_query(".dashboard-title")              ← confirm we're logged in
+4. browser_debug({ console_types: ["error"] })   <- check for login errors
+5. browser_query(".dashboard-title")              <- confirm we're logged in
+```
+
+### Hover + tooltip example
+```
+1. browser_act([{ action: "hover", selector: ".info-icon" }])
+2. browser_query(".tooltip", { fields: ["text", "visible"] })
+```
+
+### Drag-and-drop example
+```
+// Reorder columns
+browser_act([{ action: "drag", selector: ".col-name", target: ".col-age" }])
+
+// Resize a column by 100px
+browser_act([{ action: "drag", selector: ".resize-handle", offsetX: 100, offsetY: 0 }])
+```
+
+### Right-click context menu
+```
+1. browser_act([{ action: "click", selector: ".grid-row", button: "right" }])
+2. browser_query(".context-menu-item", { all: true, fields: ["text"] })
+```
+
+### Scroll inside a container
+```
+browser_scroll({ container: ".ag-body-viewport", direction: "down", pixels: 500 })
+```
+
+### Count elements quickly
+```
+browser_query({ selector: ".ag-row", count_only: true })
+// -> { selector: ".ag-row", count: 47 }
 ```
 
 ---
@@ -106,6 +193,8 @@ Returns a PNG screenshot. **Use as a last resort** — prefer `browser_debug` an
 | Variable | Default | Description |
 |---|---|---|
 | `HEADLESS` | `false` | Run browser headless (`true`) or visible (`false`) |
+| `REAL_CHROME` | `false` | Use your installed Chrome instead of Playwright's Chromium |
+| `CHROME_PROFILE` | `Default` | Chrome profile name (when `REAL_CHROME=true`) |
 
 The browser launches lazily — it won't open until the first tool call.
 

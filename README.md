@@ -8,30 +8,41 @@ Built with [Playwright](https://playwright.dev) + [MCP SDK](https://github.com/m
 
 ---
 
-## Quick Start (npx)
+## Install (recommended)
 
-**Prerequisites:** Node.js 18+
+**Prerequisites:** Node.js 18+, pnpm
+
+```bash
+git clone https://github.com/emadklenka/mare_browser_mcp
+cd mare_browser_mcp
+pnpm install
+npx playwright install chromium
+```
+
+This is the fastest way to run the server — starts instantly with no registry lookups.
+
+---
+
+## Alternative installs
+
+**Global install** — no cloning, still fast:
+
+```bash
+pnpm add -g mare-browser-mcp
+npx playwright install chromium
+```
+
+**npx (try it once)** — convenient but slow on every start since it checks the npm registry each time:
 
 ```bash
 npx mare-browser-mcp
 ```
 
-That's it. First run will install Playwright's Chromium automatically if needed.
-
----
-
-## Install from source
-
-```bash
-git clone https://github.com/emadklenka/mare_browser_mcp
-cd mare-browser-mcp
-pnpm install
-npx playwright install chromium
-```
-
 ---
 
 ## Register with Claude Code
+
+If you cloned the repo, the setup script does it for you:
 
 ```bash
 pnpm run setup
@@ -45,22 +56,21 @@ That's it. The script detects the correct path automatically and registers the M
 {
   "mcpServers": {
     "mare-browser": {
-      "command": "npx",
-      "args": ["mare-browser-mcp"],
+      "command": "node",
+      "args": ["/absolute/path/to/mare_browser_mcp/src/index.js"],
       "env": { "HEADLESS": "false" }
     }
   }
 }
 ```
 
-Or if installed from source, use the absolute path:
+If installed globally:
 
 ```json
 {
   "mcpServers": {
     "mare-browser": {
-      "command": "node",
-      "args": ["/absolute/path/to/mare-browser-mcp/src/index.js"],
+      "command": "mare-browser-mcp",
       "env": { "HEADLESS": "false" }
     }
   }
@@ -79,13 +89,16 @@ Add this to `~/.config/opencode/opencode.json` (global) or `opencode.json` (proj
   "mcp": {
     "mare_browser_mcp": {
       "type": "local",
-      "command": ["npx", "mare-browser-mcp"]
+      "command": [
+        "node",
+        "/absolute/path/to/mare_browser_mcp/src/index.js"
+      ]
     }
   }
 }
 ```
 
-Or if installed from source, use the absolute path:
+If installed globally:
 
 ```json
 {
@@ -93,10 +106,7 @@ Or if installed from source, use the absolute path:
   "mcp": {
     "mare_browser_mcp": {
       "type": "local",
-      "command": [
-        "node",
-        "/absolute/path/to/mare-browser-mcp/src/index.js"
-      ]
+      "command": ["mare-browser-mcp"]
     }
   }
 }

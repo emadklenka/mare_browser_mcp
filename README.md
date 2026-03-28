@@ -8,9 +8,19 @@ Built with [Playwright](https://playwright.dev) + [MCP SDK](https://github.com/m
 
 ---
 
-## Install
+## Quick Start (npx)
 
-**Prerequisites:** Node.js 18+, pnpm
+**Prerequisites:** Node.js 18+
+
+```bash
+npx mare-browser-mcp
+```
+
+That's it. First run will install Playwright's Chromium automatically if needed.
+
+---
+
+## Install from source
 
 ```bash
 git clone https://github.com/emadklenka/mare_browser_mcp
@@ -29,7 +39,21 @@ pnpm run setup
 
 That's it. The script detects the correct path automatically and registers the MCP with Claude Code. Restart Claude Code and the browser tools are ready.
 
-**Manual config** — if you prefer to do it yourself, add this to your `~/.claude.json` under `mcpServers`:
+**Manual config** — add to `~/.claude.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "mare-browser": {
+      "command": "npx",
+      "args": ["mare-browser-mcp"],
+      "env": { "HEADLESS": "false" }
+    }
+  }
+}
+```
+
+Or if installed from source, use the absolute path:
 
 ```json
 {
@@ -55,6 +79,20 @@ Add this to `~/.config/opencode/opencode.json` (global) or `opencode.json` (proj
   "mcp": {
     "mare_browser_mcp": {
       "type": "local",
+      "command": ["npx", "mare-browser-mcp"]
+    }
+  }
+}
+```
+
+Or if installed from source, use the absolute path:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mare_browser_mcp": {
+      "type": "local",
       "command": [
         "node",
         "/absolute/path/to/mare-browser-mcp/src/index.js"
@@ -63,8 +101,6 @@ Add this to `~/.config/opencode/opencode.json` (global) or `opencode.json` (proj
   }
 }
 ```
-
-**Important:** Use the absolute path to `src/index.js` — relative paths won't work.
 
 ---
 

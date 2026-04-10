@@ -6,6 +6,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { chromium, devices } from "playwright";
+import { fileURLToPath } from "url";
+import { realpathSync } from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -159,6 +161,8 @@ export function resolveDeviceOptions(device, orientation, custom) {
 
   // Orientation flip: swap viewport + screen width/height if requested
   // orientation doesn't match the natural orientation of the base dimensions.
+  // Square viewports (width === height) have no natural orientation and are
+  // intentionally a no-op — both conditions use strict > comparisons.
   if (orientation === "landscape" && base.viewport.height > base.viewport.width) {
     base.viewport = { width: base.viewport.height, height: base.viewport.width };
     base.screen   = { width: base.screen.height,   height: base.screen.width };
@@ -899,9 +903,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 // Only launch the stdio transport when this file is executed as a script
-// (e.g. `node src/index.js` or `npx mare-browser-mcp`). When imported as a
-// module (e.g. from tests), skip the transport so the import has no side effect.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// (e.g. `node src/index.js`, `npx mare-browser-mcp`, or via the "bin" entry).
+// When imported as a module (e.g. from tests), skip the transport so the
+// import has no side effect. realpathSync resolves symlinks so global installs
+// work — process.argv[1] is the symlink path, import.meta.url is the real path.
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

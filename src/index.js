@@ -20,6 +20,7 @@ let consoleLog = [];
 let networkLog = [];
 let dialogLog = [];
 const pendingRequests = new Map(); // reqId → { url, method, startTime, ... }
+let currentEmulation = null; // resolved Playwright options, null = desktop default
 
 const HEADLESS = process.env.HEADLESS === "true";
 const REAL_CHROME = process.env.REAL_CHROME === "true";
@@ -220,11 +221,10 @@ async function ensureBrowser() {
         "--disable-blink-features=AutomationControlled",
       ],
     });
-    context = await browser.newContext({
-      viewport: null,
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    });
+    const baseContextOptions = currentEmulation
+      ? { ...currentEmulation }
+      : { viewport: null, userAgent: UA_DESKTOP_CHROME };
+    context = await browser.newContext(baseContextOptions);
   }
   page = await context.newPage();
 

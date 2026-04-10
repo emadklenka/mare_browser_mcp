@@ -5,7 +5,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { chromium } from "playwright";
+import { chromium, devices } from "playwright";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -23,6 +23,93 @@ const HEADLESS = process.env.HEADLESS === "true";
 const REAL_CHROME = process.env.REAL_CHROME === "true";
 const MAX_BODY_SIZE = 4096; // 4KB cap for request/response bodies
 const CHROME_PROFILE = process.env.CHROME_PROFILE || "Default";
+
+// ─── Device emulation: hardcoded UA strings ───────────────────────────────────
+// Captured 2026-04-11 for devices not in Playwright's built-in registry.
+// Chrome version deliberately tracks real-device stable, not headless build
+// (Playwright's chromium.version is a dead giveaway to UA sniffers).
+const UA_GALAXY_S24 =
+  "Mozilla/5.0 (Linux; Android 14; SM-S921U) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+// Tablet Chrome drops "Mobile" from the UA — this is correct and affects
+// UA sniffers that distinguish phone vs tablet.
+const UA_GALAXY_TAB_S9 =
+  "Mozilla/5.0 (Linux; Android 14; SM-X710) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+const UA_IPAD_PRO_13 =
+  "Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) AppleWebKit/605.1.15 " +
+  "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
+
+const UA_DESKTOP_CHROME =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+// ─── Device emulation: preset table ───────────────────────────────────────────
+// Values are full newContext() options objects. Playwright's `devices` registry
+// entries already include viewport/userAgent/deviceScaleFactor/isMobile/hasTouch.
+// Custom entries (devices not in registry) must supply all of those explicitly
+// plus a `screen` field so window.screen.* reflects the emulated dimensions.
+const PRESETS = {
+  "iphone-15-pro-max": devices["iPhone 15 Pro Max"],
+  "iphone-15-pro":     devices["iPhone 15 Pro"],
+  "iphone-15":         devices["iPhone 15"],
+  "iphone-se":         devices["iPhone SE"],
+  "ipad-pro-11":       devices["iPad Pro 11"],
+  "ipad-mini":         devices["iPad Mini"],
+
+  "ipad-pro-13": {
+    userAgent: UA_IPAD_PRO_13,
+    viewport: { width: 1024, height: 1366 },
+    screen:   { width: 1024, height: 1366 },
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  },
+
+  "galaxy-s24": {
+    userAgent: UA_GALAXY_S24,
+    viewport: { width: 360, height: 800 },
+    screen:   { width: 360, height: 800 },
+    deviceScaleFactor: 3,
+    isMobile: true,
+    hasTouch: true,
+  },
+
+  "galaxy-tab-s9": {
+    userAgent: UA_GALAXY_TAB_S9,
+    viewport: { width: 800, height: 1280 },
+    screen:   { width: 800, height: 1280 },
+    deviceScaleFactor: 2.5,
+    isMobile: true,
+    hasTouch: true,
+  },
+
+  "desktop-chrome": {
+    userAgent: UA_DESKTOP_CHROME,
+    viewport: { width: 1280, height: 800 },
+    screen:   { width: 1280, height: 800 },
+    deviceScaleFactor: 1,
+    isMobile: false,
+    hasTouch: false,
+  },
+};
+
+// Substring each device's resolved UA must contain, keyed by the user-facing
+// preset key. Used by checkIdentity() to assert the context actually took.
+const UA_SUBSTRINGS = {
+  "iphone-15-pro-max": "iPhone",
+  "iphone-15-pro":     "iPhone",
+  "iphone-15":         "iPhone",
+  "iphone-se":         "iPhone",
+  "ipad-pro-13":       "iPad",
+  "ipad-pro-11":       "iPad",
+  "ipad-mini":         "iPad",
+  "galaxy-s24":        "Android",
+  "galaxy-tab-s9":     "Android",
+  "desktop-chrome":    "Macintosh",
+};
 
 // ─── Lazy init ────────────────────────────────────────────────────────────────
 async function isPageAlive() {

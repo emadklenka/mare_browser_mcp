@@ -698,6 +698,62 @@ async function browserRestart({ url }) {
   return { restarted: true };
 }
 
+async function browserEmulateDevice({ device, orientation, custom }) {
+  if (REAL_CHROME) {
+    return {
+      ok: false,
+      error:
+        "browser_emulate_device is not supported in REAL_CHROME mode. " +
+        "Unset REAL_CHROME or restart the MCP with REAL_CHROME=false.",
+    };
+  }
+
+  let resolved;
+  try {
+    resolved = resolveDeviceOptions(device, orientation, custom);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+
+  await ensureBrowser();
+  const previousUrl = page.url();
+
+  // Set currentEmulation BEFORE teardown so the next ensureBrowser() picks it up.
+  currentEmulation = resolved;
+  await teardown();
+  await ensureBrowser();
+
+  let previous_url_restored = true;
+  let previous_url_error;
+  if (previousUrl && previousUrl !== "about:blank") {
+    try {
+      await page.goto(previousUrl);
+    } catch (e) {
+      previous_url_restored = false;
+      previous_url_error = e.message;
+    }
+  }
+
+  const verified = await computeVerification(page, resolved);
+  const identityCheck = checkIdentity(verified, resolved, device);
+  if (!identityCheck.ok) {
+    return { ok: false, error: identityCheck.reason, verified };
+  }
+
+  return {
+    ok: true,
+    active: {
+      device,
+      orientation: orientation || "portrait",
+      ...resolved,
+    },
+    previous_url: previousUrl,
+    previous_url_restored,
+    ...(previous_url_error ? { previous_url_error } : {}),
+    verified,
+  };
+}
+
 async function browserUpload({ selector, files }) {
   await ensureBrowser();
   await page.setInputFiles(selector, files);

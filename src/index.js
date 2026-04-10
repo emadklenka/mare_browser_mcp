@@ -175,6 +175,76 @@ export function resolveDeviceOptions(device, orientation, custom) {
   return base;
 }
 
+// ─── Device emulation: verification ───────────────────────────────────────────
+// Reads live identity + layout signals from the page. Does NOT decide ok/fail.
+// That is checkIdentity's job, deliberately separated so layout_mode cannot
+// leak into the success gate.
+async function computeVerification(page, resolved) {
+  const raw = await page.evaluate(() => ({
+    userAgent: navigator.userAgent,
+    devicePixelRatio: window.devicePixelRatio,
+    hasTouch: "ontouchstart" in window,
+    maxTouchPoints: navigator.maxTouchPoints,
+    pointer_coarse: matchMedia("(pointer: coarse)").matches,
+    hover_none: matchMedia("(hover: none)").matches,
+    orientation_portrait: matchMedia("(orientation: portrait)").matches,
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    has_viewport_meta: !!document.querySelector("meta[name=viewport]"),
+  }));
+
+  // Classify layout_mode (informational only — see checkIdentity).
+  let layout_mode;
+  if (raw.innerWidth === resolved.viewport.width) {
+    layout_mode = "responsive";
+  } else if (
+    raw.innerWidth === 980 &&
+    raw.has_viewport_meta === false &&
+    resolved.isMobile === true
+  ) {
+    layout_mode = "legacy-980-fallback";
+  } else {
+    layout_mode = "unexpected";
+  }
+
+  return {
+    ...raw,
+    layout_mode,
+    current_url: page.url(),
+  };
+}
+
+// Decides ok/fail based ONLY on identity fields. MUST NOT read layout_mode
+// or innerWidth. Returns {ok: true} or {ok: false, reason: "..."}.
+function checkIdentity(verified, resolved, device) {
+  const expectedSubstring = UA_SUBSTRINGS[device] || null;
+  if (expectedSubstring && !verified.userAgent.includes(expectedSubstring)) {
+    return {
+      ok: false,
+      reason: `userAgent missing expected substring '${expectedSubstring}' (got: ${verified.userAgent})`,
+    };
+  }
+  if (verified.hasTouch !== resolved.hasTouch) {
+    return {
+      ok: false,
+      reason: `hasTouch mismatch: expected ${resolved.hasTouch}, got ${verified.hasTouch}`,
+    };
+  }
+  if (verified.pointer_coarse !== resolved.isMobile) {
+    return {
+      ok: false,
+      reason: `pointer_coarse mismatch: expected ${resolved.isMobile}, got ${verified.pointer_coarse}`,
+    };
+  }
+  if (verified.devicePixelRatio !== resolved.deviceScaleFactor) {
+    return {
+      ok: false,
+      reason: `devicePixelRatio mismatch: expected ${resolved.deviceScaleFactor}, got ${verified.devicePixelRatio}`,
+    };
+  }
+  return { ok: true };
+}
+
 // ─── Lazy init ────────────────────────────────────────────────────────────────
 async function isPageAlive() {
   if (!page) return false;

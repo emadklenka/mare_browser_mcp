@@ -619,6 +619,7 @@ async function browserRestart({ url }) {
   networkLog = [];
   dialogLog = [];
   pendingRequests.clear();
+  currentEmulation = null;
   await ensureBrowser();
   if (url) {
     await page.goto(url);

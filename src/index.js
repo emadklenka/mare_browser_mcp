@@ -715,6 +715,7 @@ async function browserEmulateDevice({ device, orientation, custom }) {
     return { ok: false, error: e.message };
   }
 
+  // Need a live page so we can capture its URL before tearing down.
   await ensureBrowser();
   const previousUrl = page.url();
 
@@ -744,7 +745,7 @@ async function browserEmulateDevice({ device, orientation, custom }) {
     ok: true,
     active: {
       device,
-      orientation: orientation || "portrait",
+      orientation: resolved.viewport.width >= resolved.viewport.height ? "landscape" : "portrait",
       ...resolved,
     },
     previous_url: previousUrl,

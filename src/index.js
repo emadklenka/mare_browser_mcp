@@ -111,6 +111,65 @@ const UA_SUBSTRINGS = {
   "desktop-chrome":    "Macintosh",
 };
 
+// ─── Device emulation: pure option resolver ───────────────────────────────────
+// Pure function — no Playwright calls. Takes user input, returns the options
+// object to pass to browser.newContext(). Exported so it can be unit-tested
+// without launching a browser.
+export function resolveDeviceOptions(device, orientation, custom) {
+  let base;
+
+  if (device === "custom") {
+    if (!custom) {
+      throw new Error("custom device selected but 'custom' object not provided");
+    }
+    if (!custom.userAgent) {
+      throw new Error("custom.userAgent is required");
+    }
+    if (!custom.viewport || typeof custom.viewport.width !== "number" || typeof custom.viewport.height !== "number") {
+      throw new Error("custom.viewport is required (width + height)");
+    }
+    base = {
+      userAgent: custom.userAgent,
+      viewport: { width: custom.viewport.width, height: custom.viewport.height },
+      screen:   { width: custom.viewport.width, height: custom.viewport.height },
+      deviceScaleFactor: custom.deviceScaleFactor ?? 2,
+      isMobile: custom.isMobile ?? true,
+      hasTouch: custom.hasTouch ?? true,
+    };
+  } else {
+    const preset = PRESETS[device];
+    if (!preset) {
+      const valid = Object.keys(PRESETS).concat("custom").join(", ");
+      throw new Error(`Unknown device '${device}'. Valid: ${valid}`);
+    }
+    // Clone so orientation flipping can't mutate the shared PRESETS entry.
+    // Playwright's devices[] entries don't include `screen`, so default it
+    // to match viewport when missing.
+    base = {
+      userAgent: preset.userAgent,
+      viewport: { width: preset.viewport.width, height: preset.viewport.height },
+      screen: preset.screen
+        ? { width: preset.screen.width, height: preset.screen.height }
+        : { width: preset.viewport.width, height: preset.viewport.height },
+      deviceScaleFactor: preset.deviceScaleFactor,
+      isMobile: preset.isMobile,
+      hasTouch: preset.hasTouch,
+    };
+  }
+
+  // Orientation flip: swap viewport + screen width/height if requested
+  // orientation doesn't match the natural orientation of the base dimensions.
+  if (orientation === "landscape" && base.viewport.height > base.viewport.width) {
+    base.viewport = { width: base.viewport.height, height: base.viewport.width };
+    base.screen   = { width: base.screen.height,   height: base.screen.width };
+  } else if (orientation === "portrait" && base.viewport.width > base.viewport.height) {
+    base.viewport = { width: base.viewport.height, height: base.viewport.width };
+    base.screen   = { width: base.screen.height,   height: base.screen.width };
+  }
+
+  return base;
+}
+
 // ─── Lazy init ────────────────────────────────────────────────────────────────
 async function isPageAlive() {
   if (!page) return false;
@@ -839,5 +898,10 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Only launch the stdio transport when this file is executed as a script
+// (e.g. `node src/index.js` or `npx mare-browser-mcp`). When imported as a
+// module (e.g. from tests), skip the transport so the import has no side effect.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

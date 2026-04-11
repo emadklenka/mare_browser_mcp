@@ -33,26 +33,35 @@ export async function browserSnapshot({ max_depth }) {
       return null;
     }
 
+    // innerText respects CSS visibility — <style>, <script>, and display:none
+    // content is excluded. textContent would bleed inline styles and hidden
+    // elements into the name string. Fall back to textContent if innerText
+    // is unavailable (detached nodes).
+    function cleanText(el) {
+      const raw = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      return raw.length > 100 ? raw.slice(0, 100) + "…" : raw;
+    }
+
     function getName(el) {
       if (el.getAttribute("aria-label")) return el.getAttribute("aria-label");
       const lb = el.getAttribute("aria-labelledby");
-      if (lb) { const r = document.getElementById(lb); if (r) return r.textContent?.trim() || ""; }
+      if (lb) { const r = document.getElementById(lb); if (r) return cleanText(r); }
       if (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") {
-        if (el.type === "submit") return "Submit";
-        if (el.type === "reset") return "Reset";
+        if (el.type === "submit") return el.value || "Submit";
+        if (el.type === "reset") return el.value || "Reset";
         if (el.placeholder) return el.placeholder;
         const label = el.closest("label");
-        if (label) return label.textContent?.trim() || "";
-        if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l) return l.textContent?.trim() || ""; }
+        if (label) return cleanText(label);
+        if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l) return cleanText(l); }
         if (el.title) return el.title;
-        return el.textContent?.trim() || "";
+        return cleanText(el);
       }
       if (el.tagName === "A" || el.tagName === "SUMMARY") {
-        const t = el.textContent?.trim();
+        const t = cleanText(el);
         if (t) return t;
         if (el.title) return el.title;
       }
-      return el.textContent?.trim() || "";
+      return cleanText(el);
     }
 
     function getSelector(el) {

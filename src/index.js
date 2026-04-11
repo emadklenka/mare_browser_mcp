@@ -36,7 +36,7 @@ import { browserEmulateDevice } from "./emulation.js";
 dotenv.config();
 
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.5.0" },
+  { name: "mare-browser-mcp", version: "1.5.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -61,18 +61,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "browser_act",
       description:
-        `Perform one or more browser actions in sequence. Batch multiple steps into one call. Available actions:
+        `Perform one or more browser actions in sequence. Batch multiple steps into one call.
+
+Two ways to target an element — use whichever is more stable:
+• ref — accessibility ref from browser_snapshot (preferred). LLM-friendly: no selector guessing, survives CSS class churn, resistant to obfuscated build output. Call browser_snapshot first to get refs like "e9", "e42", then pass them to actions: { action: "click", ref: "e9" }.
+• selector — raw CSS selector. Use when you already know it, or for elements not in the a11y tree.
+
+Example ref flow:
+  1. browser_snapshot()              → { snapshot, refs: [{ref: "e9", role: "button", name: "Sign in"}] }
+  2. browser_act({ commands: [{ action: "click", ref: "e9" }] })
+
+Available actions:
 • click — click an element (supports left/right/middle button). Use button:'right' for context menus
 • hover — hover over an element for tooltips, dropdown menus, hover states
 • drag — drag an element to a target selector (column reorder, kanban) OR by pixel offset (column resize, sliders). Use target for element-to-element, offsetX/offsetY for precise pixel drag
-• clicklink — click a link/button by visible text
+• clicklink — click a link/button by visible text (text-based; does not use ref/selector)
 • fill — fill an input field (clears first)
 • select — select a dropdown option
-• keypress — press a key (Enter, Tab, Escape, etc.)
+• keypress — press a key (Enter, Tab, Escape, etc.) — keyboard action, no ref/selector needed
 • waitfor — wait for an element to appear
 • scrollto — scroll an element into view
-• wait — pause for N milliseconds
-• clearconsole — clear captured console logs`,
+• wait — pause for N milliseconds (no target)
+• clearconsole — clear captured console logs (no target)
+
+click, hover, drag, fill, select, waitfor, scrollto all accept either 'ref' or 'selector'. If both are provided, 'ref' wins. Refs are invalidated on navigation — re-snapshot if the page has changed.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -165,7 +177,17 @@ Use url_filter and method_filter to focus on specific API calls. Use console_typ
     {
       name: "browser_snapshot",
       description:
-        "Return the accessibility tree of the current page with refs attached to interactive elements. Use this instead of guessing CSS selectors — the LLM can reference elements by role and name. Refs (e.g. 'e42') can be passed to browser_act as an alternative to selectors. Refs are invalidated on navigation.",
+        `Return the accessibility tree of the current page with refs attached to interactive elements (buttons, links, textboxes, checkboxes, etc.). Use this INSTEAD of guessing CSS selectors from a screenshot — selectors break on class-name churn, refs don't.
+
+Returns { url, snapshot: [...tree], refs: [{ref, selector, role, name}, ...] }.
+
+Each ref like "e9" maps internally to a stable selector. Pass refs to browser_act:
+  browser_act({ commands: [
+    { action: "fill", ref: "e42", value: "user@example.com" },
+    { action: "click", ref: "e9" }
+  ]})
+
+Refs are invalidated automatically on navigation — re-snapshot after any browser_navigate or URL change. max_depth defaults to 10.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -280,8 +302,8 @@ The code is evaluated as an expression — use an IIFE for multi-statement code.
         `Switch the browser session into a device emulation profile (iPhone / iPad / Android tablet / desktop reset / custom). Emulation lives on the browser context — it persists across browser_navigate calls until you swap to another device or call browser_restart.
 
 IMPORTANT behaviors:
-• Swapping devices tears down and recreates the browser context. Cookies and localStorage are LOST. After the swap the tool auto-navigates back to the URL you were on, but pages behind auth may land on a login page — this is expected, not a bug.
-• innerWidth: 980 on a mobile emulation is NOT a bug. It means the current page has no <meta name="viewport"> and is using Chrome's legacy fallback. The authoritative signals that emulation is working are: userAgent, pointer_coarse, hasTouch, devicePixelRatio.
+• Swapping devices recreates the browser context but cookies + localStorage are PRESERVED (via persistent storageState). Pages behind auth stay logged in across swaps. The tool auto-navigates back to the URL you were on. IndexedDB is not preserved — PWAs that store auth tokens there may require re-login.
+• innerWidth: 980 on a mobile emulation is NOT a bug. It means the current page has no <meta name="viewport"> and is using Chrome's legacy fallback. Check verified.layout_mode — it will be "legacy-980-fallback" in this case. The authoritative signals that emulation is working are: userAgent, pointer_coarse, hasTouch, devicePixelRatio.
 • browser_restart always clears emulation (back to desktop).
 • Not supported in REAL_CHROME mode (returns an error).
 

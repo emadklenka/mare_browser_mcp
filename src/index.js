@@ -995,6 +995,68 @@ The code is evaluated as an expression — use an IIFE for multi-statement code.
         },
       },
     },
+    {
+      name: "browser_emulate_device",
+      description:
+        `Switch the browser session into a device emulation profile (iPhone / iPad / Android tablet / desktop reset / custom). Emulation lives on the browser context — it persists across browser_navigate calls until you swap to another device or call browser_restart.
+
+IMPORTANT behaviors:
+• Swapping devices tears down and recreates the browser context. Cookies and localStorage are LOST. After the swap the tool auto-navigates back to the URL you were on, but pages behind auth may land on a login page — this is expected, not a bug.
+• innerWidth: 980 on a mobile emulation is NOT a bug. It means the current page has no <meta name="viewport"> and is using Chrome's legacy fallback. The authoritative signals that emulation is working are: userAgent, pointer_coarse, hasTouch, devicePixelRatio.
+• browser_restart always clears emulation (back to desktop).
+• Not supported in REAL_CHROME mode (returns an error).
+
+Presets and natural viewports (portrait):
+• iphone-15-pro-max (430×932), iphone-15-pro (393×852), iphone-15 (393×852), iphone-se (375×667)
+• galaxy-s24 (360×800)
+• ipad-pro-13 (1024×1366), ipad-pro-11 (834×1194), ipad-mini (768×1024)
+• galaxy-tab-s9 (800×1280)
+• desktop-chrome (1280×800, DPR 1, no touch — use this to reset)
+• custom — requires custom.userAgent + custom.viewport.{width,height}
+
+Returns { ok, active, previous_url, previous_url_restored, verified }. On failure: { ok: false, error, verified? }.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          device: {
+            type: "string",
+            enum: [
+              "iphone-15-pro-max", "iphone-15-pro", "iphone-15", "iphone-se",
+              "galaxy-s24",
+              "ipad-pro-13", "ipad-pro-11", "ipad-mini", "galaxy-tab-s9",
+              "desktop-chrome",
+              "custom",
+            ],
+            description: "Device preset key, or 'custom' to supply your own options.",
+          },
+          orientation: {
+            type: "string",
+            enum: ["portrait", "landscape"],
+            description: "Optional. Defaults to the device's natural orientation. Swaps viewport + screen width/height.",
+          },
+          custom: {
+            type: "object",
+            description: "Required iff device === 'custom'. Must include userAgent and viewport.{width,height}.",
+            properties: {
+              userAgent: { type: "string" },
+              viewport: {
+                type: "object",
+                properties: {
+                  width: { type: "number" },
+                  height: { type: "number" },
+                },
+                required: ["width", "height"],
+              },
+              deviceScaleFactor: { type: "number", description: "Default 2" },
+              isMobile: { type: "boolean", description: "Default true when custom is provided" },
+              hasTouch: { type: "boolean", description: "Default true when custom is provided" },
+            },
+            required: ["userAgent", "viewport"],
+          },
+        },
+        required: ["device"],
+      },
+    },
   ],
 }));
 
@@ -1015,6 +1077,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       case "browser_restart":          result = await browserRestart(args ?? {}); break;
       case "browser_upload":           result = await browserUpload(args); break;
       case "browser_wait_for_network": result = await browserWaitForNetwork(args); break;
+      case "browser_emulate_device":   result = await browserEmulateDevice(args); break;
       default:
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }

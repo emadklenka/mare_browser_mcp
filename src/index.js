@@ -33,7 +33,7 @@ import { browserEmulateDevice } from "./emulation.js";
 dotenv.config();
 
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.4.1" },
+  { name: "mare-browser-mcp", version: "1.4.2" },
   { capabilities: { tools: {} } }
 );
 

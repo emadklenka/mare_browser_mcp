@@ -184,6 +184,19 @@ Upload files to a file input element.
 ### `browser_restart(url?)`
 Kill the browser and start fresh. Clears all logs. Optionally navigate to a URL after restart.
 
+### `browser_emulate_device(device, orientation?, custom?)`
+Switch the browser into a device profile for responsive QA. Emulation persists across navigations until you swap devices or call `browser_restart`.
+
+**Presets (natural portrait viewport):**
+- `iphone-15-pro-max` (430×932), `iphone-15-pro` (393×852), `iphone-15` (393×852), `iphone-se` (375×667)
+- `galaxy-s24` (360×800)
+- `ipad-pro-13` (1024×1366), `ipad-pro-11` (834×1194), `ipad-mini` (768×1024)
+- `galaxy-tab-s9` (800×1280)
+- `desktop-chrome` (1280×800) — resets to desktop
+- `custom` — requires `custom.userAgent` + `custom.viewport.{width, height}`
+
+Swapping devices recreates the browser context, so cookies and localStorage are lost and auth'd pages may land on login. `innerWidth: 980` on a mobile emulation viewing a page without `<meta name="viewport">` is Chrome's legacy fallback, not a bug — `pointer_coarse`, `hasTouch`, and `userAgent` are the authoritative signals. `browser_debug` surfaces the active emulation under an `emulation` field.
+
 ---
 
 ## Example workflow
@@ -230,6 +243,16 @@ browser_scroll({ container: ".ag-body-viewport", direction: "down", pixels: 500 
 ```
 browser_query({ selector: ".ag-row", count_only: true })
 // -> { selector: ".ag-row", count: 47 }
+```
+
+### Emulate a mobile device
+```
+1. browser_emulate_device({ device: "iphone-15-pro-max" })
+2. browser_navigate({ url: "https://www.youtube.com" })
+   // redirects to m.youtube.com because of the iPhone UA
+3. browser_screenshot()                     // mobile layout
+4. browser_emulate_device({ device: "ipad-pro-13", orientation: "landscape" })
+5. browser_emulate_device({ device: "desktop-chrome" })  // reset
 ```
 
 ---

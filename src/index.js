@@ -36,7 +36,7 @@ import { browserEmulateDevice } from "./emulation.js";
 dotenv.config();
 
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.5.1" },
+  { name: "mare-browser-mcp", version: "1.5.2" },
   { capabilities: { tools: {} } }
 );
 
@@ -179,7 +179,7 @@ Use url_filter and method_filter to focus on specific API calls. Use console_typ
       description:
         `Return the accessibility tree of the current page with refs attached to interactive elements (buttons, links, textboxes, checkboxes, etc.). Use this INSTEAD of guessing CSS selectors from a screenshot — selectors break on class-name churn, refs don't.
 
-Returns { url, snapshot: [...tree], refs: [{ref, selector, role, name}, ...] }.
+Returns { url, snapshot: [...tree], refs: [{ref, selector, role, name, testId}, ...] }.
 
 Each ref like "e9" maps internally to a stable selector. Pass refs to browser_act:
   browser_act({ commands: [
@@ -187,22 +187,27 @@ Each ref like "e9" maps internally to a stable selector. Pass refs to browser_ac
     { action: "click", ref: "e9" }
   ]})
 
-Refs are invalidated automatically on navigation — re-snapshot after any browser_navigate or URL change. max_depth defaults to 10.`,
+Every node includes testId when the element has data-testid, data-test, or data-qa — use these as additional stability anchors. Refs are invalidated automatically on navigation — re-snapshot after any browser_navigate or URL change.
+
+Use compact: true to drop pure layout wrappers (divs/spans with no role, no testId) and return a flatter tree focused on interactive content. Recommended for noisy apps with deeply-nested div soup.`,
       inputSchema: {
         type: "object",
         properties: {
           max_depth: { type: "number", description: "Max tree depth (default: 10)" },
+          compact: { type: "boolean", description: "Drop non-semantic wrapper elements (divs/spans without role or testId). Flattens noisy trees." },
         },
       },
     },
     {
       name: "browser_wait_for_url",
       description:
-        "Wait for the page URL to change and match a substring pattern. Use after actions that trigger redirects (JS redirects, auth redirects, SPA route changes). Returns current URL on timeout.",
+        "Wait for the page URL to change and match a substring pattern. Use after actions that trigger redirects (JS redirects, auth redirects, SPA route changes). Returns current URL on timeout. Optionally chain a readiness gate via wait_for so you don't have to follow up with setTimeout/wait.",
       inputSchema: {
         type: "object",
         properties: {
-          pattern: { type: "string", description: "URL substring to match" },
+          pattern: { type: "string", description: "URL substring to match (or exact string if exact:true)" },
+          exact: { type: "boolean", description: "If true, match pattern as exact URL equality instead of substring (default false)" },
+          wait_for: { type: "string", enum: ["load", "domcontentloaded", "networkidle"], description: "Optional readiness signal to wait for after the URL matches. 'load' = full load event, 'domcontentloaded' = DOM parsed, 'networkidle' = no network for 500ms. Omit for just the URL match." },
           timeout: { type: "number", description: "Max wait time in ms (default: 10000)" },
         },
         required: ["pattern"],
@@ -286,11 +291,17 @@ The code is evaluated as an expression — use an IIFE for multi-statement code.
     {
       name: "browser_wait_for_network",
       description:
-        "Wait for a specific network response matching URL pattern and/or method. Returns the response with status and JSON body. Use after triggering an action to wait for its API call to complete instead of guessing with wait times.",
+        "Wait for a specific network response matching URL pattern and/or method. Returns the response with status and JSON body. Use after triggering an action to wait for its API call to complete instead of guessing with wait times. url_pattern accepts a single substring OR an array of substrings (any-of match — resolves on the first matching response).",
       inputSchema: {
         type: "object",
         properties: {
-          url_pattern: { type: "string", description: "URL substring to match (e.g. '/api/documents')" },
+          url_pattern: {
+            oneOf: [
+              { type: "string" },
+              { type: "array", items: { type: "string" } },
+            ],
+            description: "URL substring to match (e.g. '/api/documents'), or an array of substrings for any-of matching (e.g. ['/api/users', '/api/session'])",
+          },
           method: { type: "string", description: "HTTP method to match e.g. GET, POST" },
           timeout: { type: "number", description: "Max wait time in ms (default: 10000)" },
         },
@@ -315,7 +326,7 @@ Presets and natural viewports (portrait):
 • desktop-chrome (1280×800, DPR 1, no touch — use this to reset)
 • custom — requires custom.userAgent + custom.viewport.{width,height}
 
-Returns { ok, active, previous_url, previous_url_restored, verified }. On failure: { ok: false, error, verified? }.`,
+Returns { ok, active, previous_url, previous_url_restored, verified, checks, warnings? }. ok: true as long as the essential fields (UA substring + devicePixelRatio) match; soft drift in hasTouch or pointer_coarse surfaces as warnings[] without flipping ok. On hard failure: { ok: false, error, verified, checks }.`,
       inputSchema: {
         type: "object",
         properties: {

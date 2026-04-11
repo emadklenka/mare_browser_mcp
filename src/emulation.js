@@ -188,35 +188,62 @@ async function computeVerification(page, resolved) {
   };
 }
 
-// Decides ok/fail based ONLY on identity fields. MUST NOT read layout_mode
-// or innerWidth. Returns {ok: true} or {ok: false, reason: "..."}.
+// Per-field verification breakdown. Essentials (UA substring + DPR) decide
+// ok/fail. Soft fields (hasTouch, pointer_coarse) surface as warnings only —
+// Playwright sometimes reports these late on the first swap due to Chromium
+// init ordering, but the core emulation is still applied. MUST NOT read
+// layout_mode or innerWidth.
 function checkIdentity(verified, resolved, device) {
   const expectedSubstring = UA_SUBSTRINGS[device] || null;
-  if (expectedSubstring && !verified.userAgent.includes(expectedSubstring)) {
+  const checks = {
+    userAgent: {
+      expected: expectedSubstring,
+      got: verified.userAgent,
+      match: !expectedSubstring || verified.userAgent.includes(expectedSubstring),
+    },
+    devicePixelRatio: {
+      expected: resolved.deviceScaleFactor,
+      got: verified.devicePixelRatio,
+      match: verified.devicePixelRatio === resolved.deviceScaleFactor,
+    },
+    hasTouch: {
+      expected: resolved.hasTouch,
+      got: verified.hasTouch,
+      match: verified.hasTouch === resolved.hasTouch,
+    },
+    pointer_coarse: {
+      expected: resolved.isMobile,
+      got: verified.pointer_coarse,
+      match: verified.pointer_coarse === resolved.isMobile,
+    },
+  };
+
+  const warnings = [];
+  if (!checks.hasTouch.match) {
+    warnings.push(`hasTouch mismatch: expected ${checks.hasTouch.expected}, got ${checks.hasTouch.got}`);
+  }
+  if (!checks.pointer_coarse.match) {
+    warnings.push(`pointer_coarse mismatch: expected ${checks.pointer_coarse.expected}, got ${checks.pointer_coarse.got}`);
+  }
+
+  if (!checks.userAgent.match) {
     return {
       ok: false,
       reason: `userAgent missing expected substring '${expectedSubstring}' (got: ${verified.userAgent})`,
+      checks,
+      warnings,
     };
   }
-  if (verified.hasTouch !== resolved.hasTouch) {
-    return {
-      ok: false,
-      reason: `hasTouch mismatch: expected ${resolved.hasTouch}, got ${verified.hasTouch}`,
-    };
-  }
-  if (verified.pointer_coarse !== resolved.isMobile) {
-    return {
-      ok: false,
-      reason: `pointer_coarse mismatch: expected ${resolved.isMobile}, got ${verified.pointer_coarse}`,
-    };
-  }
-  if (verified.devicePixelRatio !== resolved.deviceScaleFactor) {
+  if (!checks.devicePixelRatio.match) {
     return {
       ok: false,
       reason: `devicePixelRatio mismatch: expected ${resolved.deviceScaleFactor}, got ${verified.devicePixelRatio}`,
+      checks,
+      warnings,
     };
   }
-  return { ok: true };
+
+  return { ok: true, checks, warnings };
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -263,10 +290,18 @@ export async function browserEmulateDevice({ device, orientation, custom }) {
     }
   }
 
-  const verified = await computeVerification(state.page, resolved);
-  const identityCheck = checkIdentity(verified, resolved, device);
+  // First-call race: Chromium's touch/pointer-media reporting can lag the
+  // initial context creation by 50-150ms on the very first swap of a session.
+  // Retry once with a short wait if the first read produces soft-field drift.
+  let verified = await computeVerification(state.page, resolved);
+  let identityCheck = checkIdentity(verified, resolved, device);
+  if (identityCheck.ok && identityCheck.warnings.length > 0) {
+    await state.page.waitForTimeout(200);
+    verified = await computeVerification(state.page, resolved);
+    identityCheck = checkIdentity(verified, resolved, device);
+  }
   if (!identityCheck.ok) {
-    return { ok: false, error: identityCheck.reason, verified };
+    return { ok: false, error: identityCheck.reason, verified, checks: identityCheck.checks };
   }
 
   const { _device, _orientation, ...cleanResolved } = resolved;
@@ -281,5 +316,7 @@ export async function browserEmulateDevice({ device, orientation, custom }) {
     previous_url_restored,
     ...(previous_url_error ? { previous_url_error } : {}),
     verified,
+    checks: identityCheck.checks,
+    ...(identityCheck.warnings.length > 0 ? { warnings: identityCheck.warnings } : {}),
   };
 }

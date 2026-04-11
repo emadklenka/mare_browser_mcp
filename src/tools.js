@@ -7,13 +7,13 @@ import { state, MAX_BODY_SIZE } from "./state.js";
 import { ensureBrowser, teardown } from "./browser.js";
 import sharp from "sharp";
 
-export async function browserSnapshot({ max_depth }) {
+export async function browserSnapshot({ max_depth, compact }) {
   await ensureBrowser();
   state.refMap.clear();
   state.refCounter = 0;
 
   const page = state.page;
-  const snapshot = await page.evaluate((maxDepth) => {
+  const snapshot = await page.evaluate(({ maxDepth, compact }) => {
     function getRole(el) {
       if (el.role && el.role !== "presentation" && el.role !== "none") return el.role;
       const tag = el.tagName;
@@ -88,44 +88,81 @@ export async function browserSnapshot({ max_depth }) {
       "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem",
     ]);
 
+    function getTestId(el) {
+      return el.getAttribute("data-testid")
+          || el.getAttribute("data-test")
+          || el.getAttribute("data-qa")
+          || null;
+    }
+
     const counter = { value: 0 };
     const refs = [];
 
+    // walk() returns either a single node or an array of nodes.
+    // Returning an array signals "hoist me into the parent's children"
+    // — used in compact mode to flatten out non-semantic wrapper divs.
     function walk(el, depth) {
       if (!el || depth > maxDepth || el === document.body) return null;
       const role = getRole(el);
+
+      // Walk all children first so we have a flat list for hoisting.
+      const childResults = [];
+      if (el.children) {
+        for (const c of el.children) {
+          const r = walk(c, depth + 1);
+          if (!r) continue;
+          if (Array.isArray(r)) childResults.push(...r);
+          else childResults.push(r);
+        }
+      }
+
+      const testId = getTestId(el);
+
       if (!role) {
-        if (el.children) {
-          const ch = [];
-          for (const c of el.children) { const r = walk(c, depth + 1); if (r) ch.push(r); }
-          return ch.length ? { role: el.tagName.toLowerCase(), children: ch } : null;
+        // Non-semantic wrapper (div/span/section without a role).
+        if (compact) {
+          // Flatten: only keep this wrapper if it has a testId worth surfacing,
+          // otherwise hoist children up to the parent.
+          if (testId && childResults.length) {
+            return { role: el.tagName.toLowerCase(), testId, children: childResults };
+          }
+          return childResults.length ? childResults : null;
+        }
+        // Non-compact: preserve the wrapper so structure is visible.
+        if (childResults.length) {
+          const node = { role: el.tagName.toLowerCase(), children: childResults };
+          if (testId) node.testId = testId;
+          return node;
         }
         return null;
       }
+
       const name = getName(el);
       const node = { role };
       if (name) node.name = name;
+      if (testId) node.testId = testId;
       if (INTERACTIVE.has(role)) {
         counter.value++;
         const ref = `e${counter.value}`;
         node.ref = ref;
-        refs.push({ ref, selector: getSelector(el), role, name });
+        refs.push({ ref, selector: getSelector(el), role, name, testId });
       }
-      if (el.children && el.children.length) {
-        const ch = [];
-        for (const c of el.children) { const r = walk(c, depth + 1); if (r) ch.push(r); }
-        if (ch.length) node.children = ch;
-      }
+      if (childResults.length) node.children = childResults;
       return node;
     }
 
     const children = [];
-    for (const c of document.body.children) { const r = walk(c, 0); if (r) children.push(r); }
+    for (const c of document.body.children) {
+      const r = walk(c, 0);
+      if (!r) continue;
+      if (Array.isArray(r)) children.push(...r);
+      else children.push(r);
+    }
     return { snapshot: children, refs };
-  }, max_depth || 10);
+  }, { maxDepth: max_depth || 10, compact: !!compact });
 
-  for (const { ref, selector, role, name } of snapshot.refs) {
-    state.refMap.set(ref, { selector, role, name });
+  for (const { ref, selector, role, name, testId } of snapshot.refs) {
+    state.refMap.set(ref, { selector, role, name, testId });
   }
   state.refCounter = snapshot.refs.length;
 
@@ -451,9 +488,16 @@ export async function browserWaitForNetwork({ url_pattern, method, timeout }) {
   await ensureBrowser();
   const ms = timeout || 10000;
 
+  // url_pattern accepts either a single string or an array (any-of match).
+  // Normalise to an array for a single branch in the matcher.
+  const patterns = Array.isArray(url_pattern)
+    ? url_pattern
+    : (url_pattern ? [url_pattern] : null);
+
   const response = await state.page.waitForResponse(
     res => {
-      const matches_url = url_pattern ? res.url().includes(url_pattern) : true;
+      const url = res.url();
+      const matches_url = patterns ? patterns.some(p => url.includes(p)) : true;
       const matches_method = method ? res.request().method().toUpperCase() === method.toUpperCase() : true;
       return matches_url && matches_method;
     },
@@ -527,11 +571,20 @@ export async function browserFetch({ url, method, body, headers, parse }) {
   return result;
 }
 
-export async function browserWaitForUrl({ pattern, timeout }) {
+export async function browserWaitForUrl({ pattern, timeout, exact, wait_for }) {
   await ensureBrowser();
   const ms = timeout || 10000;
+  const matcher = exact
+    ? (url) => url.toString() === pattern
+    : (url) => url.toString().includes(pattern);
   try {
-    await state.page.waitForURL(url => url.toString().includes(pattern), { timeout: ms });
+    await state.page.waitForURL(matcher, { timeout: ms });
+    // Optional readiness gate — URL change alone doesn't mean the new page
+    // is interactive. Default "load" is what page.goto waits on; users can
+    // escalate to "networkidle" or relax to "domcontentloaded".
+    if (wait_for) {
+      await state.page.waitForLoadState(wait_for, { timeout: ms });
+    }
     return {
       url: state.page.url(),
       title: await state.page.title(),

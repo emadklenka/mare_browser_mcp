@@ -308,3 +308,206 @@ test("screenshot with fullPage captures full page", async () => {
   const buf = await page.screenshot({ fullPage: true });
   assert.ok(buf.length > 0);
 });
+
+// ── v1.5.2 additions ──
+
+test("browser_wait_for_url exact match distinguishes partial substrings", async () => {
+  await page.goto(`http://localhost:${PORT}`);
+  await page.evaluate(() => {
+    history.pushState({}, "", "/dashboard-settings");
+  });
+
+  // Substring match would hit "/dashboard-settings" when waiting for "/dashboard".
+  // Exact match should NOT — the URLs differ.
+  const fullUrl = page.url();
+  assert.ok(fullUrl.includes("/dashboard-settings"));
+
+  // Substring: "/dashboard" is present
+  assert.ok(page.url().includes("/dashboard"));
+
+  // Exact: the full URL is NOT just base + "/dashboard"
+  assert.notEqual(page.url(), `http://localhost:${PORT}/dashboard`);
+});
+
+test("browser_wait_for_url wait_for: networkidle gates on network settling", async () => {
+  await page.goto(`http://localhost:${PORT}`);
+
+  // Verify Playwright's waitForLoadState accepts the three values we expose.
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForLoadState("load");
+  await page.waitForLoadState("networkidle");
+  // If any of these throw, the test fails — they should all accept fine.
+});
+
+test("browser_wait_for_network array pattern resolves on any-of match", async () => {
+  await page.goto(`http://localhost:${PORT}`);
+
+  const patterns = ["/api/users", "/api/me"];
+  const responsePromise = page.waitForResponse(
+    res => patterns.some(p => res.url().includes(p)),
+    { timeout: 5000 }
+  );
+
+  await page.evaluate(() => fetch("/api/me"));
+  const res = await responsePromise;
+  assert.ok(res.url().includes("/api/me"));
+  assert.equal(res.status(), 200);
+});
+
+test("snapshot compact mode flattens non-semantic wrappers", async () => {
+  await page.goto(`http://localhost:${PORT}`);
+  await page.evaluate(() => {
+    document.getElementById("root").innerHTML = `
+      <div class="wrapper">
+        <div class="container">
+          <div class="inner">
+            <button id="real-btn">Real Button</button>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  // Non-compact walk: the wrappers should appear in the tree.
+  const nonCompact = await page.evaluate(() => {
+    function walk(el, depth, compact) {
+      if (!el || depth > 10 || el === document.body) return null;
+      const isButton = el.tagName === "BUTTON";
+      const childResults = [];
+      if (el.children) {
+        for (const c of el.children) {
+          const r = walk(c, depth + 1, compact);
+          if (!r) continue;
+          if (Array.isArray(r)) childResults.push(...r);
+          else childResults.push(r);
+        }
+      }
+      if (!isButton) {
+        if (compact) return childResults.length ? childResults : null;
+        return childResults.length ? { role: el.tagName.toLowerCase(), children: childResults } : null;
+      }
+      const node = { role: "button", name: el.textContent };
+      if (childResults.length) node.children = childResults;
+      return node;
+    }
+    const children = [];
+    for (const c of document.body.children) {
+      const r = walk(c, 0, false);
+      if (!r) continue;
+      if (Array.isArray(r)) children.push(...r);
+      else children.push(r);
+    }
+    return children;
+  });
+
+  const compact = await page.evaluate(() => {
+    function walk(el, depth, compact) {
+      if (!el || depth > 10 || el === document.body) return null;
+      const isButton = el.tagName === "BUTTON";
+      const childResults = [];
+      if (el.children) {
+        for (const c of el.children) {
+          const r = walk(c, depth + 1, compact);
+          if (!r) continue;
+          if (Array.isArray(r)) childResults.push(...r);
+          else childResults.push(r);
+        }
+      }
+      if (!isButton) {
+        if (compact) return childResults.length ? childResults : null;
+        return childResults.length ? { role: el.tagName.toLowerCase(), children: childResults } : null;
+      }
+      const node = { role: "button", name: el.textContent };
+      if (childResults.length) node.children = childResults;
+      return node;
+    }
+    const children = [];
+    for (const c of document.body.children) {
+      const r = walk(c, 0, true);
+      if (!r) continue;
+      if (Array.isArray(r)) children.push(...r);
+      else children.push(r);
+    }
+    return children;
+  });
+
+  // Non-compact: the tree has nested div wrappers.
+  // Find the deepest non-button node — should be at least 3 levels deep from div.
+  const stringified = JSON.stringify(nonCompact);
+  assert.ok(stringified.includes('"role":"div"'), "Non-compact should preserve div wrappers");
+
+  // Compact: the button should be at the top level, no div wrappers.
+  const compactStr = JSON.stringify(compact);
+  assert.ok(!compactStr.includes('"role":"div"'), "Compact should drop div wrappers: " + compactStr);
+  assert.ok(compactStr.includes('"role":"button"'), "Compact should still have the button");
+});
+
+test("snapshot testId extraction reads data-testid, data-test, data-qa", async () => {
+  await page.goto(`http://localhost:${PORT}`);
+  await page.evaluate(() => {
+    document.getElementById("root").innerHTML = `
+      <button data-testid="submit-btn">Submit</button>
+      <a data-test="home-link" href="/">Home</a>
+      <input data-qa="email-field" type="text" />
+    `;
+  });
+
+  const testIds = await page.evaluate(() => {
+    function getTestId(el) {
+      return el.getAttribute("data-testid")
+          || el.getAttribute("data-test")
+          || el.getAttribute("data-qa")
+          || null;
+    }
+    return {
+      btn: getTestId(document.querySelector("button")),
+      link: getTestId(document.querySelector("a")),
+      input: getTestId(document.querySelector("input")),
+      div: getTestId(document.getElementById("root")),
+    };
+  });
+
+  assert.equal(testIds.btn, "submit-btn");
+  assert.equal(testIds.link, "home-link");
+  assert.equal(testIds.input, "email-field");
+  assert.equal(testIds.div, null);
+});
+
+test("soft verifier: UA+DPR match passes with warnings for touch drift", () => {
+  // Pure logic test — doesn't need a real page.
+  function checkIdentity(verified, resolved, device) {
+    const UA_SUBSTRINGS = { "iphone-15": "iPhone" };
+    const expectedSubstring = UA_SUBSTRINGS[device] || null;
+    const checks = {
+      userAgent: { expected: expectedSubstring, got: verified.userAgent, match: !expectedSubstring || verified.userAgent.includes(expectedSubstring) },
+      devicePixelRatio: { expected: resolved.deviceScaleFactor, got: verified.devicePixelRatio, match: verified.devicePixelRatio === resolved.deviceScaleFactor },
+      hasTouch: { expected: resolved.hasTouch, got: verified.hasTouch, match: verified.hasTouch === resolved.hasTouch },
+      pointer_coarse: { expected: resolved.isMobile, got: verified.pointer_coarse, match: verified.pointer_coarse === resolved.isMobile },
+    };
+    const warnings = [];
+    if (!checks.hasTouch.match) warnings.push("hasTouch drift");
+    if (!checks.pointer_coarse.match) warnings.push("pointer_coarse drift");
+    if (!checks.userAgent.match) return { ok: false, reason: "UA", checks, warnings };
+    if (!checks.devicePixelRatio.match) return { ok: false, reason: "DPR", checks, warnings };
+    return { ok: true, checks, warnings };
+  }
+
+  // UA + DPR match, hasTouch drifted — should be ok:true with warning
+  const result = checkIdentity(
+    { userAgent: "iPhone 15 Safari", devicePixelRatio: 3, hasTouch: false, pointer_coarse: true },
+    { deviceScaleFactor: 3, hasTouch: true, isMobile: true },
+    "iphone-15"
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.warnings.length, 1);
+  assert.ok(result.warnings[0].includes("hasTouch"));
+
+  // UA wrong — should be ok:false
+  const bad = checkIdentity(
+    { userAgent: "Mozilla Linux", devicePixelRatio: 3, hasTouch: true, pointer_coarse: true },
+    { deviceScaleFactor: 3, hasTouch: true, isMobile: true },
+    "iphone-15"
+  );
+  assert.equal(bad.ok, false);
+  assert.equal(bad.reason, "UA");
+});

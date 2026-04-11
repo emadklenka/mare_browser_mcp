@@ -571,6 +571,12 @@ async function browserDebug({ url_filter, method_filter, console_types, last_n }
   return {
     current_url: url,
     title,
+    emulation: currentEmulation
+      ? {
+          device: currentEmulation._device || null,
+          orientation: currentEmulation._orientation || "portrait",
+        }
+      : null,
     console: logs.slice(-n),
     network: network.slice(-n),
     dialogs: dialogLog.slice(-n),
@@ -720,6 +726,12 @@ async function browserEmulateDevice({ device, orientation, custom }) {
   const previousUrl = page.url();
 
   // Set currentEmulation BEFORE teardown so the next ensureBrowser() picks it up.
+  // Stash device + derived orientation on the options object so browser_debug
+  // can report them later. Underscored keys won't collide with Playwright's
+  // newContext() option names. Orientation is derived from actual dimensions
+  // rather than the caller's argument to stay accurate when no arg is passed.
+  resolved._device = device;
+  resolved._orientation = resolved.viewport.width >= resolved.viewport.height ? "landscape" : "portrait";
   currentEmulation = resolved;
   await teardown();
   await ensureBrowser();
@@ -741,12 +753,13 @@ async function browserEmulateDevice({ device, orientation, custom }) {
     return { ok: false, error: identityCheck.reason, verified };
   }
 
+  const { _device, _orientation, ...cleanResolved } = resolved;
   return {
     ok: true,
     active: {
       device,
-      orientation: resolved.viewport.width >= resolved.viewport.height ? "landscape" : "portrait",
-      ...resolved,
+      orientation: _orientation,
+      ...cleanResolved,
     },
     previous_url: previousUrl,
     previous_url_restored,

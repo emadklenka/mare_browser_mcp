@@ -32,12 +32,6 @@ pnpm add -g mare-browser-mcp
 npx playwright install chromium
 ```
 
-**npx (try it once)** — convenient but slow on every start since it checks the npm registry each time:
-
-```bash
-npx mare-browser-mcp
-```
-
 ---
 
 ## Register with Claude Code

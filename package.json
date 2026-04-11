@@ -1,6 +1,6 @@
 {
   "name": "mare-browser-mcp",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "description": "Lean, LLM-first browser automation MCP server. Gives Claude, OpenCode, or any MCP client a real browser to navigate, interact with, and debug web apps.",
   "type": "module",
   "license": "MIT",
@@ -47,6 +47,10 @@
     "@modelcontextprotocol/sdk": "^1.10.2",
     "dotenv": "^16.4.5",
     "playwright": "^1.50.0",
+    "sharp": "^0.34.5",
     "yoctocolors": "^2.1.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["sharp"]
   }
 }

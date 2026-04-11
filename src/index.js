@@ -27,13 +27,16 @@ import {
   browserRestart,
   browserUpload,
   browserWaitForNetwork,
+  browserFetch,
+  browserSnapshot,
+  browserWaitForUrl,
 } from "./tools.js";
 import { browserEmulateDevice } from "./emulation.js";
 
 dotenv.config();
 
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.4.2" },
+  { name: "mare-browser-mcp", version: "1.5.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -84,6 +87,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                   enum: ["click", "hover", "drag", "clicklink", "fill", "select", "keypress", "waitfor", "scrollto", "wait", "clearconsole"],
                 },
                 selector: { type: "string", description: "CSS selector (for click, hover, drag, fill, waitfor, scrollto)" },
+                ref: { type: "string", description: "Accessibility ref from browser_snapshot (alternative to selector for click, hover, drag, fill, select, waitfor, scrollto)" },
                 button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button for click (default: left). Use 'right' for context menus" },
                 target: { type: "string", description: "CSS selector of drop target (for drag — element-to-element drag)" },
                 offsetX: { type: "number", description: "Horizontal pixels to drag (for drag — precise pixel drag, e.g. column resize)" },
@@ -143,12 +147,54 @@ Use url_filter and method_filter to focus on specific API calls. Use console_typ
       },
     },
     {
-      name: "browser_screenshot",
+      name: "browser_fetch",
       description:
-        "LAST RESORT. Returns a PNG screenshot as base64. Expensive and unstructured. Only use when the problem is purely visual (layout, rendering glitch). Always try browser_debug and browser_query first.",
+        "Execute an authenticated fetch() request inside the page context. Inherits the page's cookies and session — same-origin requests work automatically, cross-origin requires CORS. Returns status, headers, and parsed body. Appears in browser_debug network log.",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties: {
+          url: { type: "string", description: "URL to fetch (relative or absolute)" },
+          method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"], description: "HTTP method (default: GET)" },
+          body: { description: "Request body — auto-JSON-encoded if object" },
+          headers: { type: "object", description: "Additional request headers (merged over defaults)" },
+          parse: { type: "string", enum: ["json", "text", "status"], description: "Response parse mode (default: json, falls back to text on parse error)" },
+        },
+        required: ["url"],
+      },
+    },
+    {
+      name: "browser_snapshot",
+      description:
+        "Return the accessibility tree of the current page with refs attached to interactive elements. Use this instead of guessing CSS selectors — the LLM can reference elements by role and name. Refs (e.g. 'e42') can be passed to browser_act as an alternative to selectors. Refs are invalidated on navigation.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          max_depth: { type: "number", description: "Max tree depth (default: 10)" },
+        },
+      },
+    },
+    {
+      name: "browser_wait_for_url",
+      description:
+        "Wait for the page URL to change and match a substring pattern. Use after actions that trigger redirects (JS redirects, auth redirects, SPA route changes). Returns current URL on timeout.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "URL substring to match" },
+          timeout: { type: "number", description: "Max wait time in ms (default: 10000)" },
+        },
+        required: ["pattern"],
+      },
+    },
+    {
+      name: "browser_screenshot",
+      description:
+        "LAST RESORT. Returns a screenshot as base64. Expensive and unstructured. Only use when the problem is purely visual (layout, rendering glitch). Always try browser_debug and browser_query first.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          quality: { type: "string", enum: ["thumbnail", "normal", "fullres"], description: "thumbnail: ~400px JPEG, small/fast. normal: full viewport PNG (default). fullres: full-page PNG." },
+        },
       },
     },
     {
@@ -159,7 +205,6 @@ Use url_filter and method_filter to focus on specific API calls. Use console_typ
 • Append text to inputs without clearing: el.value += '...'; el.dispatchEvent(new Event('input', {bubbles:true}))
 • Type character-by-character for autocomplete: use dispatchEvent with input events per character
 • Drag-and-drop: create and dispatch mousedown/mousemove/mouseup or dragstart/drop events
-• Call fetch() to hit APIs directly and return JSON
 • Read JS app state: window.__store__, React devtools, etc.
 • Check visibility via CSS: getComputedStyle(el).display, opacity, visibility
 • Scroll inside a container: document.querySelector('.container').scrollTop += 500
@@ -305,12 +350,15 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       case "browser_act":              result = await browserAct(args); break;
       case "browser_debug":            result = await browserDebug(args ?? {}); break;
       case "browser_query":            result = await browserQuery(args); break;
-      case "browser_screenshot":       result = await browserScreenshot(); break;
+      case "browser_screenshot":       result = await browserScreenshot(args ?? {}); break;
       case "browser_eval":             result = await browserEval(args); break;
       case "browser_scroll":           result = await browserScroll(args ?? {}); break;
       case "browser_restart":          result = await browserRestart(args ?? {}); break;
       case "browser_upload":           result = await browserUpload(args); break;
       case "browser_wait_for_network": result = await browserWaitForNetwork(args); break;
+      case "browser_fetch":            result = await browserFetch(args); break;
+      case "browser_snapshot":         result = await browserSnapshot(args ?? {}); break;
+      case "browser_wait_for_url":     result = await browserWaitForUrl(args); break;
       case "browser_emulate_device":   result = await browserEmulateDevice(args); break;
       default:
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };

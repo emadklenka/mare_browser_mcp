@@ -5,6 +5,136 @@
 
 import { state, MAX_BODY_SIZE } from "./state.js";
 import { ensureBrowser, teardown } from "./browser.js";
+import sharp from "sharp";
+
+export async function browserSnapshot({ max_depth }) {
+  await ensureBrowser();
+  state.refMap.clear();
+  state.refCounter = 0;
+
+  const page = state.page;
+  const snapshot = await page.evaluate((maxDepth) => {
+    function getRole(el) {
+      if (el.role && el.role !== "presentation" && el.role !== "none") return el.role;
+      const tag = el.tagName;
+      if (tag === "A") return "link";
+      if (tag === "BUTTON" || tag === "SUMMARY") return "button";
+      if (tag === "INPUT") {
+        const t = el.type?.toLowerCase();
+        if (t === "checkbox") return "checkbox";
+        if (t === "radio") return "radio";
+        if (t === "submit" || t === "reset") return "button";
+        if (t === "search") return "searchbox";
+        if (t === "hidden" || t === "file") return null;
+        return "textbox";
+      }
+      if (tag === "SELECT") return "combobox";
+      if (tag === "TEXTAREA") return "textbox";
+      return null;
+    }
+
+    function getName(el) {
+      if (el.getAttribute("aria-label")) return el.getAttribute("aria-label");
+      const lb = el.getAttribute("aria-labelledby");
+      if (lb) { const r = document.getElementById(lb); if (r) return r.textContent?.trim() || ""; }
+      if (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") {
+        if (el.type === "submit") return "Submit";
+        if (el.type === "reset") return "Reset";
+        if (el.placeholder) return el.placeholder;
+        const label = el.closest("label");
+        if (label) return label.textContent?.trim() || "";
+        if (el.id) { const l = document.querySelector(`label[for="${el.id}"]`); if (l) return l.textContent?.trim() || ""; }
+        if (el.title) return el.title;
+        return el.textContent?.trim() || "";
+      }
+      if (el.tagName === "A" || el.tagName === "SUMMARY") {
+        const t = el.textContent?.trim();
+        if (t) return t;
+        if (el.title) return el.title;
+      }
+      return el.textContent?.trim() || "";
+    }
+
+    function getSelector(el) {
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      const path = [];
+      let cur = el;
+      while (cur && cur !== document.body && cur !== document.documentElement) {
+        let sel = cur.tagName.toLowerCase();
+        if (cur.id) { sel = `#${CSS.escape(cur.id)}`; path.unshift(sel); break; }
+        const p = cur.parentElement;
+        if (p) {
+          const sibs = Array.from(p.children).filter(c => c.tagName === cur.tagName);
+          if (sibs.length > 1) sel += `:nth-of-type(${sibs.indexOf(cur) + 1})`;
+        }
+        path.unshift(sel);
+        cur = p;
+      }
+      return path.join(" > ");
+    }
+
+    const INTERACTIVE = new Set([
+      "link", "button", "textbox", "searchbox", "combobox", "listbox",
+      "checkbox", "radio", "switch", "slider", "spinbutton", "tab",
+      "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem",
+    ]);
+
+    const counter = { value: 0 };
+    const refs = [];
+
+    function walk(el, depth) {
+      if (!el || depth > maxDepth || el === document.body) return null;
+      const role = getRole(el);
+      if (!role) {
+        if (el.children) {
+          const ch = [];
+          for (const c of el.children) { const r = walk(c, depth + 1); if (r) ch.push(r); }
+          return ch.length ? { role: el.tagName.toLowerCase(), children: ch } : null;
+        }
+        return null;
+      }
+      const name = getName(el);
+      const node = { role };
+      if (name) node.name = name;
+      if (INTERACTIVE.has(role)) {
+        counter.value++;
+        const ref = `e${counter.value}`;
+        node.ref = ref;
+        refs.push({ ref, selector: getSelector(el), role, name });
+      }
+      if (el.children && el.children.length) {
+        const ch = [];
+        for (const c of el.children) { const r = walk(c, depth + 1); if (r) ch.push(r); }
+        if (ch.length) node.children = ch;
+      }
+      return node;
+    }
+
+    const children = [];
+    for (const c of document.body.children) { const r = walk(c, 0); if (r) children.push(r); }
+    return { snapshot: children, refs };
+  }, max_depth || 10);
+
+  for (const { ref, selector, role, name } of snapshot.refs) {
+    state.refMap.set(ref, { selector, role, name });
+  }
+  state.refCounter = snapshot.refs.length;
+
+  return {
+    url: page.url(),
+    snapshot: snapshot.snapshot,
+  };
+}
+
+function resolveRef(ref) {
+  if (!state.refMap.has(ref)) throw new Error(`Stale or unknown ref: ${ref}. Run browser_snapshot to get fresh refs.`);
+  return state.refMap.get(ref);
+}
+
+function refToLocator(page, ref) {
+  const { selector } = resolveRef(ref);
+  return page.locator(selector).first();
+}
 
 export async function browserNavigate({ url, clear_logs }) {
   await ensureBrowser();
@@ -23,18 +153,28 @@ export async function browserAct({ commands }) {
   const results = [];
   const page = state.page;
 
+  function getLocator(cmd) {
+    if (cmd.ref) return refToLocator(page, cmd.ref);
+    if (cmd.selector) return page.locator(cmd.selector).first();
+    throw new Error(`Action '${cmd.action}' requires 'selector' or 'ref'`);
+  }
+
   for (const cmd of commands) {
     try {
       switch (cmd.action) {
-        case "click":
-          await page.locator(cmd.selector).first().click({ button: cmd.button || "left", timeout: 5000 });
-          results.push({ action: "click", selector: cmd.selector, button: cmd.button || "left", success: true });
+        case "click": {
+          const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await loc.click({ button: cmd.button || "left", timeout: 5000 });
+          results.push({ action: "click", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), button: cmd.button || "left", success: true });
           break;
+        }
 
-        case "hover":
-          await page.locator(cmd.selector).first().hover({ timeout: 5000 });
-          results.push({ action: "hover", selector: cmd.selector, success: true });
+        case "hover": {
+          const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await loc.hover({ timeout: 5000 });
+          results.push({ action: "hover", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), success: true });
           break;
+        }
 
         case "clicklink": {
           let loc;
@@ -55,30 +195,38 @@ export async function browserAct({ commands }) {
           break;
         }
 
-        case "fill":
-          await page.fill(cmd.selector, cmd.value);
-          results.push({ action: "fill", selector: cmd.selector, success: true });
+        case "fill": {
+          const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await loc.fill(cmd.value);
+          results.push({ action: "fill", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), success: true });
           break;
+        }
 
-        case "select":
-          await page.locator(cmd.selector).first().selectOption(cmd.value, { timeout: 5000 });
-          results.push({ action: "select", selector: cmd.selector, value: cmd.value, success: true });
+        case "select": {
+          const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await loc.selectOption(cmd.value, { timeout: 5000 });
+          results.push({ action: "select", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), value: cmd.value, success: true });
           break;
+        }
 
         case "keypress":
           await page.keyboard.press(cmd.key);
           results.push({ action: "keypress", key: cmd.key, success: true });
           break;
 
-        case "waitfor":
-          await page.waitForSelector(cmd.selector, { timeout: cmd.timeout || 5000 });
-          results.push({ action: "waitfor", selector: cmd.selector, success: true });
+        case "waitfor": {
+          const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await loc.waitFor({ timeout: cmd.timeout || 5000 });
+          results.push({ action: "waitfor", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), success: true });
           break;
+        }
 
-        case "scrollto":
-          await page.locator(cmd.selector).scrollIntoViewIfNeeded();
-          results.push({ action: "scrollto", selector: cmd.selector, success: true });
+        case "scrollto": {
+          const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await loc.scrollIntoViewIfNeeded();
+          results.push({ action: "scrollto", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), success: true });
           break;
+        }
 
         case "wait":
           await page.waitForTimeout(cmd.ms || 1000);
@@ -86,20 +234,20 @@ export async function browserAct({ commands }) {
           break;
 
         case "drag": {
-          const source = page.locator(cmd.selector).first();
+          const source = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
           if (cmd.target) {
             await source.dragTo(page.locator(cmd.target).first(), { timeout: 5000 });
-            results.push({ action: "drag", selector: cmd.selector, target: cmd.target, success: true });
+            results.push({ action: "drag", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), target: cmd.target, success: true });
           } else if (cmd.offsetX !== undefined || cmd.offsetY !== undefined) {
             const box = await source.boundingBox();
-            if (!box) throw new Error(`Element not visible: ${cmd.selector}`);
+            if (!box) throw new Error("Element not visible");
             const startX = box.x + box.width / 2;
             const startY = box.y + box.height / 2;
             await page.mouse.move(startX, startY);
             await page.mouse.down();
             await page.mouse.move(startX + (cmd.offsetX || 0), startY + (cmd.offsetY || 0), { steps: 10 });
             await page.mouse.up();
-            results.push({ action: "drag", selector: cmd.selector, offsetX: cmd.offsetX, offsetY: cmd.offsetY, success: true });
+            results.push({ action: "drag", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), offsetX: cmd.offsetX, offsetY: cmd.offsetY, success: true });
           } else {
             throw new Error("drag requires either 'target' (CSS selector) or 'offsetX'/'offsetY' (pixels)");
           }
@@ -202,14 +350,23 @@ export async function browserQuery({ selector, all, fields, visible_only, limit,
   return { selector, count: Array.isArray(data) ? data.length : undefined, result: data };
 }
 
-export async function browserScreenshot() {
+export async function browserScreenshot({ quality }) {
   await ensureBrowser();
-  const buffer = await state.page.screenshot();
-  return {
-    type: "image",
-    data: buffer.toString("base64"),
-    mimeType: "image/png",
-  };
+  const mode = quality || "normal";
+
+  if (mode === "thumbnail") {
+    const buf = await state.page.screenshot({ type: "jpeg", quality: 60 });
+    const resized = await sharp(buf).resize({ width: 400 }).jpeg({ quality: 60 }).toBuffer();
+    return { type: "image", data: resized.toString("base64"), mimeType: "image/jpeg" };
+  }
+
+  if (mode === "fullres") {
+    const buf = await state.page.screenshot({ fullPage: true });
+    return { type: "image", data: buf.toString("base64"), mimeType: "image/png" };
+  }
+
+  const buf = await state.page.screenshot();
+  return { type: "image", data: buf.toString("base64"), mimeType: "image/png" };
 }
 
 export async function browserEval({ code }) {
@@ -315,4 +472,67 @@ export async function browserWaitForNetwork({ url_pattern, method, timeout }) {
   }
 
   return result;
+}
+
+export async function browserFetch({ url, method, body, headers, parse }) {
+  await ensureBrowser();
+  const result = await state.page.evaluate(async ({ url, method, body, headers, parse }) => {
+    const opts = { credentials: "include", method: method || "GET" };
+    if (body !== undefined) {
+      opts.body = typeof body === "string" ? body : JSON.stringify(body);
+      if (!headers) headers = {};
+      if (typeof body !== "string" && !headers["content-type"] && !headers["Content-Type"]) {
+        headers["content-type"] = "application/json";
+      }
+    }
+    if (headers) opts.headers = headers;
+
+    const res = await fetch(url, opts);
+    const contentType = res.headers.get("content-type") || "";
+    let responseBody;
+    if (parse === "status") {
+      responseBody = null;
+    } else if (parse === "text" || !contentType.includes("json")) {
+      responseBody = await res.text();
+    } else {
+      const text = await res.text();
+      try {
+        responseBody = JSON.parse(text);
+      } catch {
+        responseBody = text;
+      }
+    }
+
+    const resHeaders = {};
+    res.headers.forEach((v, k) => { resHeaders[k] = v; });
+
+    return {
+      status: res.status,
+      ok: res.ok,
+      url: res.url,
+      headers: resHeaders,
+      body: responseBody,
+    };
+  }, { url, method, body, headers, parse: parse || "json" });
+
+  return result;
+}
+
+export async function browserWaitForUrl({ pattern, timeout }) {
+  await ensureBrowser();
+  const ms = timeout || 10000;
+  try {
+    await state.page.waitForURL(url => url.toString().includes(pattern), { timeout: ms });
+    return {
+      url: state.page.url(),
+      title: await state.page.title(),
+      ok: true,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: "timeout",
+      current_url: state.page.url(),
+    };
+  }
 }

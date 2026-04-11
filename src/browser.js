@@ -6,7 +6,7 @@
 // every other module that imports state sees the current values.
 
 import { chromium } from "playwright";
-import { state, HEADLESS, REAL_CHROME, MAX_BODY_SIZE, CHROME_PROFILE, UA_DESKTOP_CHROME } from "./state.js";
+import { state, HEADLESS, REAL_CHROME, MAX_BODY_SIZE, CHROME_PROFILE, UA_DESKTOP_CHROME, saveState, loadStateOptions } from "./state.js";
 
 export async function isPageAlive() {
   if (!state.page) return false;
@@ -19,8 +19,10 @@ export async function isPageAlive() {
 }
 
 export async function teardown() {
+  const ctx = state.context;
   state.page = null;
-  try { await state.context?.close(); } catch {}
+  await saveState(ctx);
+  try { await ctx?.close(); } catch {}
   try { await state.browser?.close(); } catch {}
   state.context = null;
   state.browser = null;
@@ -56,7 +58,8 @@ export async function ensureBrowser() {
     const baseContextOptions = state.currentEmulation
       ? { ...state.currentEmulation }
       : { viewport: null, userAgent: UA_DESKTOP_CHROME };
-    state.context = await state.browser.newContext(baseContextOptions);
+    const persisted = await loadStateOptions();
+    state.context = await state.browser.newContext({ ...baseContextOptions, ...persisted });
   }
   state.page = await state.context.newPage();
 
@@ -196,4 +199,9 @@ export async function ensureBrowser() {
     if (state.dialogLog.length > 50) state.dialogLog.shift();
     await dialog.accept();
   });
+
+  state.page.on("framenavigated", () => { state.refMap.clear(); state.refCounter = 0; });
 }
+
+process.on("SIGTERM", async () => { await teardown(); process.exit(0); });
+process.on("SIGINT", async () => { await teardown(); process.exit(0); });

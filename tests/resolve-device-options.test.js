@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveDeviceOptions } from "../src/index.js";
+import { resolveDeviceOptions } from "../src/emulation.js";
 
 test("desktop-chrome preset returns desktop options with DPR 1 and no touch", () => {
   const opts = resolveDeviceOptions("desktop-chrome");

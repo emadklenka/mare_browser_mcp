@@ -812,7 +812,7 @@ async function browserWaitForNetwork({ url_pattern, method, timeout }) {
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.4.0" },
+  { name: "mare-browser-mcp", version: "1.4.1" },
   { capabilities: { tools: {} } }
 );
 

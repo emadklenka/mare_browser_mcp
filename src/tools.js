@@ -95,6 +95,12 @@ export async function browserSnapshot({ max_depth, compact }) {
           || null;
     }
 
+    // Clear any data-mare-ref tags left over from a previous snapshot so refs
+    // never collide across snapshots.
+    for (const el of document.querySelectorAll("[data-mare-ref]")) {
+      el.removeAttribute("data-mare-ref");
+    }
+
     const counter = { value: 0 };
     const refs = [];
 
@@ -145,6 +151,11 @@ export async function browserSnapshot({ max_depth, compact }) {
         counter.value++;
         const ref = `e${counter.value}`;
         node.ref = ref;
+        // Pin the ref to THIS exact element via a unique attribute. Resolution
+        // at action time targets the tagged node directly, so a ref can never
+        // silently drift to a different element when the DOM reflows. The
+        // generated CSS selector is kept only as human-readable context.
+        el.setAttribute("data-mare-ref", ref);
         refs.push({ ref, selector: getSelector(el), role, name, testId });
       }
       if (childResults.length) node.children = childResults;
@@ -178,8 +189,13 @@ function resolveRef(ref) {
 }
 
 function refToLocator(page, ref) {
-  const { selector } = resolveRef(ref);
-  return page.locator(selector).first();
+  // resolveRef throws a friendly "stale ref" error if the ref isn't in the map.
+  // Resolution targets the data-mare-ref tag set during the snapshot, pinning
+  // the action to the exact element that was captured. If a re-render replaced
+  // that element the tag is gone, so the locator matches nothing and the action
+  // fails loudly instead of clicking whatever now occupies the position.
+  resolveRef(ref);
+  return page.locator(`[data-mare-ref="${ref}"]`).first();
 }
 
 export async function browserNavigate({ url, clear_logs }) {

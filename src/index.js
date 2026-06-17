@@ -64,7 +64,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         `Perform one or more browser actions in sequence. Batch multiple steps into one call.
 
 Two ways to target an element — use whichever is more stable:
-• ref — accessibility ref from browser_snapshot (preferred). LLM-friendly: no selector guessing, survives CSS class churn, resistant to obfuscated build output. Call browser_snapshot first to get refs like "e9", "e42", then pass them to actions: { action: "click", ref: "e9" }.
+• ref — accessibility ref from browser_snapshot (preferred). LLM-friendly: no selector guessing, survives CSS class churn, resistant to obfuscated build output. Each ref is pinned to the exact element captured in the snapshot, so it never silently drifts to a different element when the page reflows. If that element is removed or re-rendered, the action fails loudly ("stale ref" / element not found) — re-snapshot rather than retrying. Call browser_snapshot first to get refs like "e9", "e42", then pass them to actions: { action: "click", ref: "e9" }.
 • selector — raw CSS selector. Use when you already know it, or for elements not in the a11y tree.
 
 Example ref flow:

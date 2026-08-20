@@ -3,9 +3,68 @@
 // `state` from state.js so concurrent access (there isn't any — MCP is
 // single-threaded) sees consistent values.
 
-import { state, MAX_BODY_SIZE } from "./state.js";
-import { ensureBrowser, teardown } from "./browser.js";
+import { state, MAX_BODY_SIZE, MARE_BROWSER_VERSION } from "./state.js";
+import { ensureBrowser, rebuildBrowser, teardown } from "./browser.js";
+import { hideRecordingPointer, installRecordingPointer } from "./recording-pointer.js";
 import sharp from "sharp";
+import { execFile } from "node:child_process";
+import { mkdir, rename, stat, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, extname, join } from "node:path";
+import { promisify } from "node:util";
+
+const CAPTURE_DIR = process.env.CAPTURE_DIR || join(tmpdir(), "mare-browser-mcp");
+const execFileAsync = promisify(execFile);
+
+function evenDimension(value) {
+  return Math.max(2, Math.floor(value / 2) * 2);
+}
+
+export function networkEntryForDebug(entry, { includeBodies = false } = {}) {
+  const safe = { ...entry };
+  if (!includeBodies) {
+    delete safe.requestBody;
+    delete safe.responseBody;
+  }
+  return safe;
+}
+
+function captureName(name, fallback, extension) {
+  const input = basename(name || fallback, extname(name || fallback));
+  const safe = input.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || fallback;
+  return `${safe}.${extension}`;
+}
+
+function timestampSlug() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+async function convertVideoToMp4(inputPath, outputPath) {
+  try {
+    await execFileAsync("ffmpeg", [
+      "-y", "-loglevel", "error", "-i", inputPath,
+      "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+      "-an", outputPath,
+    ]);
+  } catch (error) {
+    const reason = error.code === "ENOENT"
+      ? "ffmpeg is not installed or is not available on PATH"
+      : error.stderr?.trim() || error.message;
+    throw new Error(`MP4 export failed: ${reason}. The WebM source remains at ${inputPath}`);
+  }
+}
+
+async function moveRecordingPointer(page, locator) {
+  if (!state.videoRecording) return;
+  await installRecordingPointer(page);
+  await locator.scrollIntoViewIfNeeded();
+  const box = await locator.boundingBox();
+  if (!box) return;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+  await page.waitForTimeout(220);
+}
 
 export async function browserSnapshot({ max_depth, compact }) {
   await ensureBrowser();
@@ -226,6 +285,7 @@ export async function browserAct({ commands }) {
       switch (cmd.action) {
         case "click": {
           const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await moveRecordingPointer(page, loc);
           await loc.click({ button: cmd.button || "left", timeout: 5000 });
           results.push({ action: "click", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), button: cmd.button || "left", success: true });
           break;
@@ -252,7 +312,9 @@ export async function browserAct({ commands }) {
                       .filter({ hasText: cmd.text });
           if ((await loc.count()) === 0)
             throw new Error(`No visible element found with text "${cmd.text}"`);
-          await loc.first().click({ timeout: 5000 });
+          const target = loc.first();
+          await moveRecordingPointer(page, target);
+          await target.click({ timeout: 5000 });
           results.push({ action: "clicklink", text: cmd.text, success: true });
           break;
         }
@@ -268,6 +330,22 @@ export async function browserAct({ commands }) {
           const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
           await loc.selectOption(cmd.value, { timeout: 5000 });
           results.push({ action: "select", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), value: cmd.value, success: true });
+          break;
+        }
+
+        case "dispatch": {
+          // Fire a DOM event on an element. For web-component apps (LWC/Stencil)
+          // that only react to composed CustomEvents — e.g. a custom input that
+          // ignores native value-setting and listens for `change` with a detail
+          // payload. Defaults bubbles + composed true so the event crosses shadow
+          // boundaries like a real user interaction.
+          if (!cmd.event) throw new Error("dispatch requires 'event' (the event type name, e.g. 'change')");
+          const loc = cmd.ref ? refToLocator(page, cmd.ref) : page.locator(cmd.selector).first();
+          await loc.evaluate((el, { event, detail, bubbles, composed }) => {
+            const init = { bubbles: bubbles !== false, composed: composed !== false };
+            el.dispatchEvent(detail !== undefined ? new CustomEvent(event, { ...init, detail }) : new Event(event, init));
+          }, { event: cmd.event, detail: cmd.detail, bubbles: cmd.bubbles, composed: cmd.composed });
+          results.push({ action: "dispatch", ...(cmd.ref ? { ref: cmd.ref } : { selector: cmd.selector }), event: cmd.event, success: true });
           break;
         }
 
@@ -333,7 +411,7 @@ export async function browserAct({ commands }) {
   return { results };
 }
 
-export async function browserDebug({ url_filter, method_filter, console_types, last_n }) {
+export async function browserDebug({ url_filter, method_filter, console_types, last_n, include_bodies }) {
   await ensureBrowser();
 
   const url = state.page.url();
@@ -358,7 +436,7 @@ export async function browserDebug({ url_filter, method_filter, console_types, l
         }
       : null,
     console: logs.slice(-n),
-    network: network.slice(-n),
+    network: network.slice(-n).map(entry => networkEntryForDebug(entry, { includeBodies: include_bodies === true })),
     dialogs: state.dialogLog.slice(-n),
   };
 }
@@ -414,6 +492,7 @@ export async function browserQuery({ selector, all, fields, visible_only, limit,
 
 export async function browserScreenshot({ quality }) {
   await ensureBrowser();
+  if (!state.videoRecording) await hideRecordingPointer(state.page);
   const mode = quality || "normal";
 
   if (mode === "thumbnail") {
@@ -429,6 +508,266 @@ export async function browserScreenshot({ quality }) {
 
   const buf = await state.page.screenshot();
   return { type: "image", data: buf.toString("base64"), mimeType: "image/png" };
+}
+
+export async function browserSaveScreenshot({ filename, full_page, format, hide_recording_pointer }) {
+  await ensureBrowser();
+  await mkdir(CAPTURE_DIR, { recursive: true });
+
+  const pointer = hide_recording_pointer === false
+    ? await state.page.evaluate(() => {
+        const present = !!document.getElementById("mare-recording-pointer");
+        return { present, hidden: !present };
+      })
+    : await hideRecordingPointer(state.page);
+  const viewport = await state.page.evaluate(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    device_pixel_ratio: window.devicePixelRatio || 1,
+  }));
+
+  const imageFormat = format === "jpeg" ? "jpeg" : "png";
+  const extension = imageFormat === "jpeg" ? "jpg" : "png";
+  const outputPath = join(
+    CAPTURE_DIR,
+    captureName(filename, `screenshot-${timestampSlug()}`, extension)
+  );
+  const options = imageFormat === "jpeg"
+    ? { type: "jpeg", quality: 85, fullPage: !!full_page }
+    : { type: "png", fullPage: !!full_page };
+
+  await state.page.screenshot({ ...options, path: outputPath });
+  const file = await stat(outputPath);
+  const metadata = await sharp(outputPath).metadata();
+
+  return {
+    ok: true,
+    path: outputPath,
+    mime_type: imageFormat === "jpeg" ? "image/jpeg" : "image/png",
+    bytes: file.size,
+    size: { width: metadata.width, height: metadata.height },
+    viewport: { width: viewport.width, height: viewport.height },
+    device_pixel_ratio: viewport.device_pixel_ratio,
+    recording_pointer_hidden: pointer.hidden,
+    full_page: !!full_page,
+    url: state.page.url(),
+    title: await state.page.title(),
+  };
+}
+
+export async function browserVideo({
+  action,
+  filename,
+  format,
+  capture_scale,
+  selector,
+  ref,
+  wait_for_url,
+  exact,
+  timeout,
+  post_click_ms,
+}) {
+  if (action === "capture_click") {
+    if (!selector && !ref) throw new Error("browser_video capture_click requires 'selector' or 'ref'");
+    if (state.videoRecording) throw new Error("A video recording is already active. Stop it before capture_click.");
+
+    await ensureBrowser();
+    const sourceUrl = state.page.url();
+    const started = await browserVideo({ action: "start", filename, format, capture_scale });
+    let actionResult = null;
+    let urlResult = null;
+    let captureError = null;
+
+    try {
+      const acted = await browserAct({
+        commands: [{ action: "click", ...(ref ? { ref } : { selector }) }],
+      });
+      actionResult = acted.results[0] || null;
+      if (!actionResult?.success) throw new Error(actionResult?.error || "Click failed");
+
+      if (wait_for_url) {
+        urlResult = await browserWaitForUrl({
+          pattern: wait_for_url,
+          exact,
+          timeout: timeout || 2500,
+        });
+        if (!urlResult.ok) throw new Error(`Destination URL did not match '${wait_for_url}' before the clip timeout`);
+      }
+
+      const tailMs = Math.max(0, Math.min(post_click_ms ?? 450, 2000));
+      if (tailMs) await state.page.waitForTimeout(tailMs);
+    } catch (error) {
+      captureError = error;
+    }
+
+    const stopped = state.videoRecording
+      ? await browserVideo({ action: "stop" })
+      : null;
+
+    return {
+      ...(stopped || started),
+      ok: !captureError,
+      action: "capture_click",
+      source_url: sourceUrl,
+      destination_url: state.page?.url() || null,
+      action_succeeded: actionResult?.success === true,
+      url_matched: wait_for_url ? urlResult?.ok === true : null,
+      ...(captureError ? { error: captureError.message } : {}),
+    };
+  }
+
+  if (action === "status") {
+    return state.videoRecording
+      ? {
+          ok: true,
+          version: MARE_BROWSER_VERSION,
+          recording: true,
+          started_at: state.videoRecording.startedAt,
+          filename: state.videoRecording.filename,
+          format: state.videoRecording.format,
+          mode: state.videoRecording.mode,
+          size: state.videoRecording.size,
+          viewport: state.videoRecording.viewport,
+          device_pixel_ratio: state.videoRecording.devicePixelRatio,
+          capture_scale: state.videoRecording.captureScale,
+          url: state.page?.url() || state.videoRecording.url,
+        }
+      : { ok: true, version: MARE_BROWSER_VERSION, recording: false };
+  }
+
+  if (action === "start") {
+    if (state.videoRecording) {
+      throw new Error("A video recording is already active. Stop it before starting another.");
+    }
+
+    await ensureBrowser();
+    await mkdir(CAPTURE_DIR, { recursive: true });
+    const currentUrl = state.page.url();
+    const metrics = await state.page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio || 1,
+    }));
+    const captureScale = capture_scale === "css" ? "css" : "device";
+    const scale = captureScale === "device" ? metrics.devicePixelRatio : 1;
+    const videoSize = {
+      width: evenDimension(metrics.width * scale),
+      height: evenDimension(metrics.height * scale),
+    };
+    const startedAt = new Date().toISOString();
+    const requestedFormat = format === "mp4" ? "mp4" : "webm";
+    const fallbackName = `recording-${timestampSlug()}`;
+    const rawFilename = captureName(
+      filename,
+      fallbackName,
+      "webm"
+    );
+    const outputFilename = captureName(filename, fallbackName, requestedFormat);
+    const rawPath = join(CAPTURE_DIR, rawFilename);
+    const outputPath = join(CAPTURE_DIR, outputFilename);
+    let mode;
+
+    if (typeof state.page.screencast?.start === "function") {
+      await state.page.screencast.start({ path: rawPath, size: videoSize, quality: 100 });
+      mode = "screencast";
+    } else {
+      await rebuildBrowser({ url: currentUrl, recordVideoDir: CAPTURE_DIR, recordVideoSize: videoSize });
+      mode = "recordVideo";
+    }
+
+    state.videoRecording = {
+      filename: outputFilename,
+      startedAt,
+      startedAtMs: Date.now(),
+      url: currentUrl,
+      size: videoSize,
+      viewport: { width: metrics.width, height: metrics.height },
+      devicePixelRatio: metrics.devicePixelRatio,
+      captureScale,
+      mode,
+      format: requestedFormat,
+      rawPath,
+      outputPath,
+    };
+
+    return {
+      ok: true,
+      version: MARE_BROWSER_VERSION,
+      recording: true,
+      started_at: startedAt,
+      filename: outputFilename,
+      format: requestedFormat,
+      mode,
+      size: videoSize,
+      viewport: { width: metrics.width, height: metrics.height },
+      device_pixel_ratio: metrics.devicePixelRatio,
+      capture_scale: captureScale,
+      temp_directory: CAPTURE_DIR,
+      url: state.page.url(),
+      page_restored: state.page.url() === currentUrl,
+    };
+  }
+
+  if (action === "stop") {
+    if (!state.videoRecording) {
+      throw new Error("No video recording is active. Start one before stopping.");
+    }
+
+    const recording = state.videoRecording;
+    const currentUrl = state.page.url();
+    const currentTitle = await state.page.title();
+
+    if (recording.mode === "screencast") {
+      await state.page.screencast.stop();
+    } else {
+      const video = state.page.video();
+      if (!video) throw new Error("The active page has no Playwright video stream.");
+      await rebuildBrowser({ url: currentUrl, recordVideoDir: null, recordVideoSize: null });
+      const playwrightPath = await video.path();
+      if (playwrightPath !== recording.rawPath) await rename(playwrightPath, recording.rawPath);
+    }
+
+    const pointer = await hideRecordingPointer(state.page);
+
+    // Capture has ended at this point. Clear the active state before optional
+    // post-processing so a failed MP4 conversion never leaves a phantom
+    // recording that cannot be stopped again.
+    state.videoRecording = null;
+
+    let finalPath = recording.rawPath;
+    let mimeType = "video/webm";
+    if (recording.format === "mp4") {
+      await convertVideoToMp4(recording.rawPath, recording.outputPath);
+      await unlink(recording.rawPath);
+      finalPath = recording.outputPath;
+      mimeType = "video/mp4";
+    }
+
+    const file = await stat(finalPath);
+
+    return {
+      ok: true,
+      version: MARE_BROWSER_VERSION,
+      recording: false,
+      path: finalPath,
+      mime_type: mimeType,
+      bytes: file.size,
+      started_at: recording.startedAt,
+      duration_ms: Date.now() - recording.startedAtMs,
+      format: recording.format,
+      mode: recording.mode,
+      size: recording.size,
+      viewport: recording.viewport,
+      device_pixel_ratio: recording.devicePixelRatio,
+      capture_scale: recording.captureScale,
+      recording_pointer_hidden: pointer.hidden,
+      url: currentUrl,
+      title: currentTitle,
+      page_restored: state.page.url() === currentUrl,
+    };
+  }
+
+  throw new Error("browser_video action must be 'start', 'stop', 'status', or 'capture_click'.");
 }
 
 export async function browserEval({ code }) {
@@ -480,6 +819,9 @@ export async function browserScroll({ direction, pixels, selector, container }) 
 }
 
 export async function browserRestart({ url }) {
+  if (state.videoRecording) {
+    throw new Error("A video recording is active. Stop it before restarting the browser.");
+  }
   await teardown();
   state.consoleLog = [];
   state.networkLog = [];

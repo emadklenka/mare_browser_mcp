@@ -22,6 +22,8 @@ import {
   browserDebug,
   browserQuery,
   browserScreenshot,
+  browserSaveScreenshot,
+  browserVideo,
   browserEval,
   browserScroll,
   browserRestart,
@@ -32,11 +34,12 @@ import {
   browserWaitForUrl,
 } from "./tools.js";
 import { browserEmulateDevice } from "./emulation.js";
+import { MARE_BROWSER_VERSION } from "./state.js";
 
 dotenv.config();
 
 const server = new Server(
-  { name: "mare-browser-mcp", version: "1.5.2" },
+  { name: "mare-browser-mcp", version: MARE_BROWSER_VERSION },
   { capabilities: { tools: {} } }
 );
 
@@ -79,6 +82,7 @@ Available actions:
 • fill — fill an input field (clears first)
 • select — select a dropdown option
 • keypress — press a key (Enter, Tab, Escape, etc.) — keyboard action, no ref/selector needed
+• dispatch — fire a DOM event on an element (event + optional detail/bubbles/composed). For web-component apps (LWC/Stencil) that only react to composed CustomEvents, e.g. firing 'change' with a {name,value} detail on a custom input. Defaults bubbles+composed true
 • waitfor — wait for an element to appear
 • scrollto — scroll an element into view
 • wait — pause for N milliseconds (no target)
@@ -96,10 +100,10 @@ click, hover, drag, fill, select, waitfor, scrollto all accept either 'ref' or '
               properties: {
                 action: {
                   type: "string",
-                  enum: ["click", "hover", "drag", "clicklink", "fill", "select", "keypress", "waitfor", "scrollto", "wait", "clearconsole"],
+                  enum: ["click", "hover", "drag", "clicklink", "fill", "select", "keypress", "dispatch", "waitfor", "scrollto", "wait", "clearconsole"],
                 },
-                selector: { type: "string", description: "CSS selector (for click, hover, drag, fill, waitfor, scrollto)" },
-                ref: { type: "string", description: "Accessibility ref from browser_snapshot (alternative to selector for click, hover, drag, fill, select, waitfor, scrollto)" },
+                selector: { type: "string", description: "CSS selector (for click, hover, drag, fill, dispatch, waitfor, scrollto)" },
+                ref: { type: "string", description: "Accessibility ref from browser_snapshot (alternative to selector for click, hover, drag, fill, select, dispatch, waitfor, scrollto)" },
                 button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button for click (default: left). Use 'right' for context menus" },
                 target: { type: "string", description: "CSS selector of drop target (for drag — element-to-element drag)" },
                 offsetX: { type: "number", description: "Horizontal pixels to drag (for drag — precise pixel drag, e.g. column resize)" },
@@ -107,6 +111,10 @@ click, hover, drag, fill, select, waitfor, scrollto all accept either 'ref' or '
                 text: { type: "string", description: "Link text (for clicklink)" },
                 value: { type: "string", description: "Text to fill (for fill)" },
                 key: { type: "string", description: "Key to press e.g. Enter, Tab (for keypress)" },
+                event: { type: "string", description: "Event type to fire e.g. 'change', 'input' (for dispatch)" },
+                detail: { description: "Optional CustomEvent detail payload (for dispatch). If present a CustomEvent is fired, otherwise a plain Event" },
+                bubbles: { type: "boolean", description: "Event bubbles (for dispatch, default true)" },
+                composed: { type: "boolean", description: "Event crosses shadow-DOM boundaries (for dispatch, default true)" },
                 timeout: { type: "number", description: "Timeout ms (for waitfor)" },
                 ms: { type: "number", description: "Milliseconds to wait (for wait)" },
               },
@@ -120,8 +128,8 @@ click, hover, drag, fill, select, waitfor, scrollto all accept either 'ref' or '
     {
       name: "browser_debug",
       description:
-        `PREFERRED DEBUGGING TOOL. Returns current URL, page title, console logs, dialogs (alert/confirm/prompt), and rich network requests in one call. Always call this before browser_screenshot.
-Network entries include: method, URL, query params (parsed), request body (JSON/form), request headers (auth masked), status code, response body (JSON), and duration_ms for performance analysis.
+        `PREFERRED DEBUGGING TOOL. Returns current URL, page title, console logs, dialogs (alert/confirm/prompt), and network request metadata in one call. Always call this before browser_screenshot.
+Request and response bodies are omitted by default. Set include_bodies=true only when body inspection is necessary; sensitive keys are recursively redacted even then.
 Use url_filter and method_filter to focus on specific API calls. Use console_types to filter log levels.`,
       inputSchema: {
         type: "object",
@@ -134,6 +142,7 @@ Use url_filter and method_filter to focus on specific API calls. Use console_typ
             description: "Filter console by type: error, warning, log, pageerror",
           },
           last_n: { type: "number", description: "Return last N entries (default 50)" },
+          include_bodies: { type: "boolean", description: "Include recursively redacted request/response bodies (default false)." },
         },
       },
     },
@@ -222,6 +231,41 @@ Use compact: true to drop pure layout wrappers (divs/spans with no role, no test
         properties: {
           quality: { type: "string", enum: ["thumbnail", "normal", "fullres"], description: "thumbnail: ~400px JPEG, small/fast. normal: full viewport PNG (default). fullres: full-page PNG." },
         },
+      },
+    },
+    {
+      name: "browser_save_screenshot",
+      description:
+        "Capture the current viewport or full page to the OS temp folder and return the absolute file path plus metadata. Use this when the screenshot is an artifact for QA, documentation, or marketing; unlike browser_screenshot it does not return base64 image data.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filename: { type: "string", description: "Optional safe filename. The extension is normalized from format." },
+          full_page: { type: "boolean", description: "Capture the entire scrollable page (default false)." },
+          format: { type: "string", enum: ["png", "jpeg"], description: "Output format (default png)." },
+          hide_recording_pointer: { type: "boolean", description: "Hide Mare's recording pointer before capture (default true). Set false only when intentionally documenting the pointer." },
+        },
+      },
+    },
+    {
+      name: "browser_video",
+      description:
+        "Start, stop, inspect, or atomically capture one click with a precise Playwright screencast. capture_click avoids inter-tool latency, includes Mare's yellow pointer/pulse, optionally waits for a destination URL, and automatically stops. The pointer is hidden after every stop. Output defaults to WebM; request format='mp4' for H.264 export.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["start", "stop", "status", "capture_click"] },
+          filename: { type: "string", description: "Optional output filename for action=start; extension is normalized to the requested format." },
+          format: { type: "string", enum: ["webm", "mp4"], description: "Output format for action=start (default webm). MP4 export requires ffmpeg on PATH." },
+          capture_scale: { type: "string", enum: ["device", "css"], description: "Capture at device-pixel resolution (default) or CSS-pixel resolution." },
+          selector: { type: "string", description: "CSS selector for action=capture_click." },
+          ref: { type: "string", description: "Accessibility ref for action=capture_click; takes precedence over selector." },
+          wait_for_url: { type: "string", description: "Optional destination URL substring to require before capture_click stops." },
+          exact: { type: "boolean", description: "Match wait_for_url exactly instead of as a substring." },
+          timeout: { type: "number", description: "Maximum milliseconds to wait for wait_for_url during capture_click (default 2500)." },
+          post_click_ms: { type: "number", description: "Tail after the click/URL match so the pulse and initial navigation remain visible (default 450, maximum 2000)." },
+        },
+        required: ["action"],
       },
     },
     {
@@ -384,6 +428,8 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       case "browser_debug":            result = await browserDebug(args ?? {}); break;
       case "browser_query":            result = await browserQuery(args); break;
       case "browser_screenshot":       result = await browserScreenshot(args ?? {}); break;
+      case "browser_save_screenshot":  result = await browserSaveScreenshot(args ?? {}); break;
+      case "browser_video":            result = await browserVideo(args); break;
       case "browser_eval":             result = await browserEval(args); break;
       case "browser_scroll":           result = await browserScroll(args ?? {}); break;
       case "browser_restart":          result = await browserRestart(args ?? {}); break;

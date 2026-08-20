@@ -246,6 +246,58 @@ function checkIdentity(verified, resolved, device) {
   return { ok: true, checks, warnings };
 }
 
+// Read identity/layout signals and retry once if only soft fields drift (the
+// same first-swap Chromium lag the rebuild path guards against).
+async function verifyWithRetry(page, resolved, device) {
+  let verified = await computeVerification(page, resolved);
+  let identityCheck = checkIdentity(verified, resolved, device);
+  if (identityCheck.ok && identityCheck.warnings.length > 0) {
+    await page.waitForTimeout(200);
+    verified = await computeVerification(page, resolved);
+    identityCheck = checkIdentity(verified, resolved, device);
+  }
+  return { verified, identityCheck };
+}
+
+// Emulate the device in place via CDP so the live page + its in-memory SPA state survive the swap — no context teardown, no reload.
+async function applyEmulationInPlace(page, resolved) {
+  const client = await page.context().newCDPSession(page);
+  // setViewportSize keeps Playwright's own viewport bookkeeping (and screenshots) in sync.
+  await page.setViewportSize({ width: resolved.viewport.width, height: resolved.viewport.height });
+  await client.send("Emulation.setDeviceMetricsOverride", {
+    width: resolved.viewport.width,
+    height: resolved.viewport.height,
+    screenWidth: resolved.screen.width,
+    screenHeight: resolved.screen.height,
+    deviceScaleFactor: resolved.deviceScaleFactor,
+    mobile: resolved.isMobile,
+  });
+  await client.send("Emulation.setUserAgentOverride", { userAgent: resolved.userAgent });
+  await client.send("Emulation.setTouchEmulationEnabled", {
+    enabled: resolved.hasTouch,
+    maxTouchPoints: resolved.hasTouch ? 5 : 0,
+  });
+  await client.send("Emulation.setEmulatedMedia", {
+    features: [
+      { name: "pointer", value: resolved.isMobile ? "coarse" : "fine" },
+      { name: "hover", value: resolved.isMobile ? "none" : "hover" },
+    ],
+  });
+  // CDP toggles the touch API but won't sync the ontouchstart attr on an
+  // already-loaded window; shim it both ways so '"ontouchstart" in window'
+  // matches a real device. Critically, REMOVE it when swapping to a non-touch
+  // device (e.g. galaxy-s24 → desktop-chrome) — otherwise the prior mobile
+  // override leaks and the page still reports touch support.
+  await page.evaluate((hasTouch) => {
+    const present = "ontouchstart" in window;
+    if (hasTouch && !present) {
+      Object.defineProperty(window, "ontouchstart", { value: null, writable: true, configurable: true });
+    } else if (!hasTouch && present) {
+      try { delete window.ontouchstart; } catch { /* non-configurable native prop — leave it */ }
+    }
+  }, resolved.hasTouch);
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 export async function browserEmulateDevice({ device, orientation, custom }) {
   if (REAL_CHROME) {
@@ -264,42 +316,48 @@ export async function browserEmulateDevice({ device, orientation, custom }) {
     return { ok: false, error: e.message };
   }
 
-  // Need a live page so we can capture its URL before tearing down.
+  // Need a live page so we can capture its URL (and emulate it in place).
   await ensureBrowser();
   const previousUrl = state.page.url();
 
-  // Set currentEmulation BEFORE teardown so the next ensureBrowser() picks it up.
-  // Stash device + derived orientation on the options object so browser_debug
-  // can report them later. Underscored keys won't collide with Playwright's
-  // newContext() option names. Orientation is derived from actual dimensions
-  // rather than the caller's argument to stay accurate when no arg is passed.
+  // Set currentEmulation so a later ensureBrowser() (dead-session rebuild) picks
+  // it up. Stash device + derived orientation on the options object so
+  // browser_debug can report them later. Underscored keys won't collide with
+  // Playwright's newContext() option names. Orientation is derived from actual
+  // dimensions rather than the caller's argument to stay accurate when no arg
+  // is passed.
   resolved._device = device;
   resolved._orientation = resolved.viewport.width >= resolved.viewport.height ? "landscape" : "portrait";
   state.currentEmulation = resolved;
-  await teardown();
-  await ensureBrowser();
+
+  // Try in-place CDP emulation first (preserves the page + SPA state); fall back to a context rebuild only if it fails or identity verification doesn't pass.
+  let in_place = true;
+  try {
+    await applyEmulationInPlace(state.page, resolved);
+  } catch {
+    in_place = false;
+  }
+  let { verified, identityCheck } = in_place
+    ? await verifyWithRetry(state.page, resolved, device)
+    : { verified: null, identityCheck: { ok: false } };
 
   let previous_url_restored = true;
   let previous_url_error;
-  if (previousUrl && previousUrl !== "about:blank") {
-    try {
-      await state.page.goto(previousUrl);
-    } catch (e) {
-      previous_url_restored = false;
-      previous_url_error = e.message;
+  if (!in_place || !identityCheck.ok) {
+    in_place = false;
+    await teardown();
+    await ensureBrowser();
+    if (previousUrl && previousUrl !== "about:blank") {
+      try {
+        await state.page.goto(previousUrl);
+      } catch (e) {
+        previous_url_restored = false;
+        previous_url_error = e.message;
+      }
     }
+    ({ verified, identityCheck } = await verifyWithRetry(state.page, resolved, device));
   }
 
-  // First-call race: Chromium's touch/pointer-media reporting can lag the
-  // initial context creation by 50-150ms on the very first swap of a session.
-  // Retry once with a short wait if the first read produces soft-field drift.
-  let verified = await computeVerification(state.page, resolved);
-  let identityCheck = checkIdentity(verified, resolved, device);
-  if (identityCheck.ok && identityCheck.warnings.length > 0) {
-    await state.page.waitForTimeout(200);
-    verified = await computeVerification(state.page, resolved);
-    identityCheck = checkIdentity(verified, resolved, device);
-  }
   if (!identityCheck.ok) {
     return { ok: false, error: identityCheck.reason, verified, checks: identityCheck.checks };
   }
@@ -312,6 +370,7 @@ export async function browserEmulateDevice({ device, orientation, custom }) {
       orientation: _orientation,
       ...cleanResolved,
     },
+    in_place,
     previous_url: previousUrl,
     previous_url_restored,
     ...(previous_url_error ? { previous_url_error } : {}),

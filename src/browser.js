@@ -7,6 +7,21 @@
 
 import { chromium } from "playwright";
 import { state, HEADLESS, REAL_CHROME, MAX_BODY_SIZE, CHROME_PROFILE, UA_DESKTOP_CHROME, saveState, loadStateOptions } from "./state.js";
+import { recordingPointerScript } from "./recording-pointer.js";
+
+const SENSITIVE_BODY_KEY = /^(password|passwd|pass|secret|client[_-]?secret|token|id[_-]?token|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|auth|credential|credentials|cookie|set[_-]?cookie|session|session[_-]?id|username|user[_-]?name)$/i;
+
+export function redactSensitiveBody(value) {
+  if (Array.isArray(value)) return value.map(redactSensitiveBody);
+  if (!value || typeof value !== "object") return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      SENSITIVE_BODY_KEY.test(key) ? "[redacted]" : redactSensitiveBody(child),
+    ])
+  );
+}
 
 export async function isPageAlive() {
   if (!state.page) return false;
@@ -46,6 +61,7 @@ export async function ensureBrowser() {
         `--profile-directory=${CHROME_PROFILE}`,
         "--disable-blink-features=AutomationControlled",
       ],
+      ...(state.recordVideoDir ? { recordVideo: { dir: state.recordVideoDir, ...(state.recordVideoSize ? { size: state.recordVideoSize } : {}) } } : {}),
     });
   } else {
     state.browser = await chromium.launch({
@@ -58,18 +74,28 @@ export async function ensureBrowser() {
     const baseContextOptions = state.currentEmulation
       ? { ...state.currentEmulation }
       : { viewport: null, userAgent: UA_DESKTOP_CHROME };
-    const persisted = await loadStateOptions();
-    state.context = await state.browser.newContext({ ...baseContextOptions, ...persisted });
+    const persisted = state.transientStorageState
+      ? { storageState: state.transientStorageState }
+      : await loadStateOptions();
+    state.transientStorageState = null;
+    state.context = await state.browser.newContext({
+      ...baseContextOptions,
+      ...persisted,
+      ...(state.recordVideoDir ? { recordVideo: { dir: state.recordVideoDir, ...(state.recordVideoSize ? { size: state.recordVideoSize } : {}) } } : {}),
+    });
   }
   state.page = await state.context.newPage();
 
-  // Hide automation signals from Cloudflare / bot-detection
+  // Hide automation signals from Cloudflare / bot-detection.
   await state.context.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3] });
     Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
     window.chrome = { runtime: {} };
   });
+
+  // Older Playwright versions use context-level recordVideo as a fallback.
+  if (state.recordVideoDir) await state.context.addInitScript(recordingPointerScript);
 
   state.page.on("console", msg => {
     state.consoleLog.push({ type: msg.type(), text: msg.text(), ts: new Date().toISOString() });
@@ -99,7 +125,7 @@ export async function ensureBrowser() {
     try {
       const parsed = new URL(url);
       const params = Object.fromEntries(parsed.searchParams);
-      if (Object.keys(params).length) entry.params = params;
+      if (Object.keys(params).length) entry.params = redactSensitiveBody(params);
     } catch {}
 
     // Capture request body
@@ -109,21 +135,21 @@ export async function ensureBrowser() {
       if (contentType.includes("json")) {
         try {
           entry.requestBody = postData.length <= MAX_BODY_SIZE
-            ? JSON.parse(postData)
+            ? redactSensitiveBody(JSON.parse(postData))
             : `[truncated: ${postData.length} bytes]`;
         } catch {
-          entry.requestBody = postData.length <= MAX_BODY_SIZE ? postData : `[truncated: ${postData.length} bytes]`;
+          entry.requestBody = postData.length <= MAX_BODY_SIZE ? "[redacted: unparseable JSON body]" : `[truncated: ${postData.length} bytes]`;
         }
       } else if (contentType.includes("x-www-form-urlencoded")) {
         try {
-          entry.requestBody = Object.fromEntries(new URLSearchParams(postData));
+          entry.requestBody = redactSensitiveBody(Object.fromEntries(new URLSearchParams(postData)));
         } catch {
-          entry.requestBody = postData.slice(0, MAX_BODY_SIZE);
+          entry.requestBody = "[redacted: unparseable form body]";
         }
       } else if (contentType.includes("multipart")) {
         entry.requestBody = "[multipart/form-data]";
       } else if (postData.length <= MAX_BODY_SIZE) {
-        entry.requestBody = postData;
+        entry.requestBody = "[redacted: non-JSON body]";
       } else {
         entry.requestBody = `[binary: ${postData.length} bytes]`;
       }
@@ -156,7 +182,7 @@ export async function ensureBrowser() {
       if (contentType.includes("json")) {
         const buf = await res.body();
         if (buf.length <= MAX_BODY_SIZE) {
-          entry.responseBody = JSON.parse(buf.toString("utf-8"));
+          entry.responseBody = redactSensitiveBody(JSON.parse(buf.toString("utf-8")));
         } else {
           entry.responseBody = `[truncated: ${buf.length} bytes]`;
         }
@@ -201,6 +227,30 @@ export async function ensureBrowser() {
   });
 
   state.page.on("framenavigated", () => { state.refMap.clear(); state.refCounter = 0; });
+}
+
+// Compatibility path for Playwright versions older than 1.59, whose video
+// recorder only activates when a context is created. Current releases use the
+// precise page.screencast API and do not call this during capture start/stop.
+export async function rebuildBrowser({ url, recordVideoDir = null, recordVideoSize = null } = {}) {
+  if (!REAL_CHROME && state.context) {
+    try {
+      state.transientStorageState = await state.context.storageState();
+    } catch {
+      state.transientStorageState = null;
+    }
+  }
+
+  await teardown();
+  state.recordVideoDir = recordVideoDir;
+  state.recordVideoSize = recordVideoSize;
+  await ensureBrowser();
+
+  if (url && url !== "about:blank") {
+    await state.page.goto(url);
+  }
+
+  return state.page;
 }
 
 process.on("SIGTERM", async () => { await teardown(); process.exit(0); });

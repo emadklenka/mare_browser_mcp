@@ -9,6 +9,8 @@
 import { existsSync, unlinkSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+export const MARE_BROWSER_VERSION = "1.7.1";
+
 export const state = {
   browser: null,
   context: null,
@@ -20,6 +22,10 @@ export const state = {
   currentEmulation: null,
   refMap: new Map(),
   refCounter: 0,
+  recordVideoDir: null,
+  recordVideoSize: null,
+  videoRecording: null,
+  transientStorageState: null,
 };
 
 export const HEADLESS = process.env.HEADLESS === "true";

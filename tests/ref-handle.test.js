@@ -79,3 +79,43 @@ test("ref fails loudly when its element is replaced, never silently mis-clicks",
   const hit = await page.evaluate(() => window.__hit);
   assert.notEqual(hit, "other", "must not silently click the replacement element");
 });
+
+// The dispatch action must fire a real CustomEvent carrying its detail payload,
+// bubbling by default — this is how web-component inputs (LWC/Stencil) receive
+// value changes when native value-setting is ignored.
+test("dispatch action fires a CustomEvent with detail that bubbles", async () => {
+  await page.setContent(`<div id="host"><button id="b">x</button></div>`);
+  await page.evaluate(() => {
+    window.__caught = null;
+    document.addEventListener("mychange", (e) => { window.__caught = e.detail; });
+  });
+
+  const res = await browserAct({ commands: [
+    { action: "dispatch", selector: "#b", event: "mychange", detail: { name: "email", value: "a@b.com" } },
+  ] });
+  assert.equal(res.results[0].success, true, JSON.stringify(res.results[0]));
+
+  const caught = await page.evaluate(() => window.__caught);
+  assert.deepEqual(caught, { name: "email", value: "a@b.com" }, "listener must receive the dispatched detail via bubbling");
+});
+
+// composed:true (the default) is what lets the event cross a shadow boundary —
+// without it, a listener on the host outside the shadow root never sees it.
+test("dispatch action crosses shadow boundaries with composed default", async () => {
+  await page.setContent(`<div id="host"></div>`);
+  await page.evaluate(() => {
+    window.__crossed = false;
+    const host = document.getElementById("host");
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `<button id="inner">x</button>`;
+    document.addEventListener("crossed", () => { window.__crossed = true; });
+  });
+
+  const res = await browserAct({ commands: [
+    { action: "dispatch", selector: "#inner", event: "crossed" },
+  ] });
+  assert.equal(res.results[0].success, true, JSON.stringify(res.results[0]));
+
+  const crossed = await page.evaluate(() => window.__crossed);
+  assert.equal(crossed, true, "composed event must escape the shadow root to the document listener");
+});

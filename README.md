@@ -134,10 +134,11 @@ Run a sequence of actions in one call. Supported actions:
 **Start here when something goes wrong.** Returns in one call:
 - Current URL and page title
 - Console logs (filterable by type: `error`, `warning`, `log`, `pageerror`)
-- Network requests with: method, URL, query params, request body, request headers (auth masked), status code, response body (JSON), and `duration_ms` timing
+- Network request metadata with: method, URL, redacted query params, request headers (auth masked), status code, and `duration_ms` timing
 - Dialog history (alert/confirm/prompt — auto-accepted, text captured)
 
 Filter with `url_filter`, `method_filter`, `console_types`, or `last_n`.
+Request and response bodies are omitted by default. Set `include_bodies: true` only when necessary; credential-like keys are recursively redacted in requests, responses, and query parameters.
 
 ### `browser_query(selector, all?, fields?, visible_only?, limit?, count_only?)`
 Read the DOM without a screenshot. Query any element by CSS selector.
@@ -171,6 +172,48 @@ Wait for a specific network response after triggering an action — smarter than
 
 ### `browser_screenshot()`
 Returns a PNG screenshot. **Use as a last resort** — prefer `browser_debug` and `browser_query` first.
+
+### `browser_save_screenshot(filename?, full_page?, format?, hide_recording_pointer?)`
+Save a screenshot as an artifact under the OS temp directory and return its absolute path, MIME type, byte size, physical pixel dimensions, CSS viewport, device-pixel ratio, URL, and page title. This is the preferred screenshot tool for QA evidence, documentation, and marketing assets because it avoids returning a large base64 payload.
+
+Mare hides its recording pointer before saved screenshots by default, preventing a completed action clip from contaminating later clean or target stills. Set `hide_recording_pointer: false` only when intentionally documenting the pointer itself.
+
+```text
+browser_save_screenshot({ filename: "candidate-grid", full_page: true, format: "png" })
+// -> { ok: true, path: "/tmp/mare-browser-mcp/candidate-grid.png", ... }
+```
+
+Set `CAPTURE_DIR` to override the default temp artifact directory.
+
+### `browser_video(action, filename?, format?, ...)`
+Record a precise Playwright screencast. `action` is `start`, `stop`, `status`, or `capture_click`; `format` is `webm` (default) or `mp4`. Screencast start and stop operate on the live page without recreating the browser context, so in-memory application state is preserved. While recording, click actions show a translucent yellow pointer and pulse. Mare now hides that pointer automatically after every stop.
+
+The default `capture_scale: "device"` records at device-pixel dimensions so video and ordinary viewport PNGs share the same native canvas on high-DPI displays. Use `capture_scale: "css"` for a smaller CSS-pixel recording. Start/status/stop responses report the Mare version, CSS viewport, device-pixel ratio, capture scale, and output size.
+
+```text
+browser_video({ action: "start", filename: "candidate-walkthrough", format: "mp4" })
+// perform browser actions
+browser_video({ action: "stop" })
+// -> { ok: true, path: "/tmp/mare-browser-mcp/candidate-walkthrough.mp4", mode: "screencast", ... }
+```
+
+For short product-storyboard actions, prefer the atomic form. It performs the start, one click, optional URL wait, short click-pulse tail, and stop inside one MCP call, avoiding static padding caused by model/tool round trips:
+
+```text
+browser_video({
+  action: "capture_click",
+  filename: "open-candidate",
+  format: "mp4",
+  selector: "[data-testid='candidate-link']",
+  wait_for_url: "/cnd/",
+  timeout: 2500,
+  post_click_ms: 450
+})
+```
+
+`capture_click` returns the source and destination URLs, action success, URL-match result, finalized artifact metadata, and pointer-cleanup result. MP4 output is automatically transcoded to high-quality H.264 and requires `ffmpeg` on `PATH`.
+
+On Playwright versions older than 1.59, Mare retains the previous context-level WebM recorder as a compatibility fallback. Stop an active recording before calling `browser_restart`.
 
 ### `browser_upload(selector, files[])`
 Upload files to a file input element.
@@ -258,6 +301,7 @@ browser_query({ selector: ".ag-row", count_only: true })
 | `HEADLESS` | `false` | Run browser headless (`true`) or visible (`false`) |
 | `REAL_CHROME` | `false` | Use your installed Chrome instead of Playwright's Chromium |
 | `CHROME_PROFILE` | `Default` | Chrome profile name (when `REAL_CHROME=true`) |
+| `CAPTURE_DIR` | OS temp + `mare-browser-mcp` | Screenshot and video artifact directory |
 
 The browser launches lazily — it won't open until the first tool call.
 
